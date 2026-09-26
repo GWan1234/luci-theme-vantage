@@ -320,4 +320,8 @@ function main(argv) {
 	return scan(targets, identifiers);
 }
 
-process.exitCode = main(process.argv.slice(2));
+/* importable: dev/replay/demo.js reuses the detectors and the mirror
+   identifier list for its pseudonymiser and its test */
+module.exports = { findings, mirrorIdentifiers, v4finding, v6finding, v6groups, IPV4, IPV6, MAC_SEP, MAC_DOT, MAC_ALLOWED, GENERIC, NAME_KEYS, PUBLIC_EXEMPT_V4, inV4, v4int };
+
+if (require.main === module) process.exitCode = main(process.argv.slice(2));

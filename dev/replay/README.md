@@ -7,7 +7,8 @@ Nothing is forwarded anywhere; there is no upstream.
     node dev/replay/server.js --mirror ../vantage-mirror [--port 8025] \
         [--theme-dir <pkg>/htdocs/luci-static/<name>] [--theme <name>] \
         [--templates <pkg>/ucode/template] [--rootfs <device rootfs dump>] \
-        [--app-dir <luci-app package dir>]... [--keep-uniwrt] [--no-synthetic]
+        [--app-dir <luci-app package dir>]... [--keep-uniwrt] [--no-synthetic] \
+        [--demo]
 
 Open <http://127.0.0.1:8025/>. Any username/password logs in.
 
@@ -117,6 +118,56 @@ calls then answer from the recording or NOT_FOUND as before).
 - `iwinfo info radioN` when the mirror only recorded it for the radio's
   first interface (`phy6g-ap0`): answered with that interface's recorded
   sample, as iwinfo itself resolves a radio name.
+
+## Demo mode (`--demo`)
+
+For screenshots, screen shares and bug reports: `--demo` pseudonymises the
+recording when it is loaded (`demo.js`), before any reply, template or
+synthetic generator can read it. Every JSON value, JSON key and text output
+(ubus replies, `log read`, `dmesg`, `ip neigh/route`, the nft ruleset, the
+process list) goes through the same mapping, which is deterministic for a
+mirror and consistent within a run:
+
+| Recorded | Served in demo mode |
+|---|---|
+| universal MAC / BSSID | `00:00:5E:00:53:xx` (RFC 7042 documentation range) |
+| locally administered MAC | `02:00:5E:00:53:xx` (U/L bit kept: randomised clients still show as private) |
+| multicast MAC | `01:00:5E:90:10:xx` |
+| bare 12-digit form of a known MAC (bridge ids, DUIDs) | the same demo MAC |
+| private IPv4, per /24 | first network `192.0.2.0/24`, second `198.51.100.0/24`, last octet kept (the gateway stays `.1`) |
+| other IPv4 networks, public IPv4 | `203.0.113.x` |
+| global IPv6 | `2001:db8:<n>::/48`, subnet id kept |
+| unique-local IPv6 | `2001:db8:fd0<n>::/48` (there is no documentation ULA prefix) |
+| long interface identifiers (EUI-64, random) | `::<n>`, so link-local addresses become short `fe80::<n>` |
+| AP hostname | `vantage-ap` |
+| SSIDs, by band in wireless config order | 2.4 GHz `Harbor`, `Harbor-IoT`, `Harbor-Guest`; 5 GHz `Harbor-5G`; 6 GHz `Harbor-6E` |
+| client hostnames, WPS device names | generic names by device type (`office-printer` / `Office printer`, `phone`, `laptop`, ...), else `device-<n>` / `Wireless device <n>` |
+| search domains | `home.arpa` |
+| DUIDs | `0004 00005e0053xx...` |
+| Wi-Fi country code | `US` (the country list marks US active); channel and power data stay as recorded |
+| time zone | `UTC` / `UTC0` |
+| SSH key fingerprints in logs | a fixed `SHA256:demo...` placeholder |
+| `serial` / `serial_number` / `sn` fields | removed |
+
+Kept: the device model and board name (the product), interface names,
+firmware and kernel versions, counters, rates, signal and noise values.
+
+Names are found the way `security-tests/check_private_addresses.js` finds
+mirror identifiers (its list is merged in), plus names containing spaces
+and the WPS names inside hostapd client signatures. `node --test tests/`
+runs the pseudonymiser over the mirror when it is present and requires zero
+findings from the checker's detectors and zero recorded identifiers or
+replaced originals in anything the replay can serve (`tests/demo.test.js`).
+
+Files served from the mirror's `static/` directories (LuCI's own
+JavaScript) are not rewritten; some stock views contain example addresses
+such as placeholders in forms, which are LuCI's, not the device's.
+
+    node dev/replay/server.js --mirror ../vantage-mirror --port 8106 --demo \
+        --theme-dir luci-theme-vantage/htdocs/luci-static/vantage --theme vantage \
+        --app-dir luci-app-vantage
+
+The README screenshots (`docs/screenshots/`) were taken this way.
 
 Theme package (`luci-theme-vantage/`; templates are picked up from its
 `ucode/template/themes/vantage/`, `menu-vantage.js` and `vantage-theme/*.js`

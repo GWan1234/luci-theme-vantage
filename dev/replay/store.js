@@ -2,7 +2,8 @@
 /* Recorded device data for the replay server.
 
    Loads every browser-* and ssh-* directory of a mirror (oldest first, so
-   newer recordings win for identical keys) and answers ubus calls:
+   newer recordings win for identical keys), pseudonymises it with
+   opts.demo (demo.js), and answers ubus calls:
      1. uci.*          in-memory overlay seeded from recorded uci.get, so
                        Save/Apply visibly work for the session
      2. session.access always granted
@@ -77,6 +78,8 @@ class Store {
 		this.interval = 5000;
 		this.t0 = Date.now();
 		this.load(mirror);
+		/* --demo: rewrite every recorded reply before anything reads it */
+		if (this.opts.demo) this.demo = require('./demo').pseudonymiseStore(this, mirror, argsKey);
 		this.uciInit();
 		this.synthetic = (this.opts.synthetic === false) ? null : new Synthetic(this);
 	}

@@ -9,12 +9,15 @@
 
    usage: node server.js --mirror <dir> [--port 8025] [--theme-dir <htdocs/luci-static/name>]
                          [--theme <name>] [--templates <ucode/template dir>] [--rootfs <dir>]
-                         [--app-dir <package dir>]... [--keep-uniwrt] [--[no-]synthetic]
+                         [--app-dir <package dir>]... [--keep-uniwrt] [--[no-]synthetic] [--demo]
 
    Pages are rendered like the device does: the dispatcher logic below
    resolves the request against the recorded menu, then the core
    view/header/footer templates from the rootfs and the theme's templates
-   are run through a small ucode template engine (ut.js). */
+   are run through a small ucode template engine (ut.js).
+
+   --demo pseudonymises the recording as it is loaded (demo.js): documentation
+   MACs/addresses, neutral hostname/SSIDs/client names, for screenshots. */
 
 const fs = require('fs');
 const http = require('http');
@@ -30,7 +33,7 @@ function parseArgs(argv) {
 	const o = { port: 8025, synthetic: true };
 	for (let i = 0; i < argv.length; i++) {
 		const m = /^--(mirror|port|theme-dir|theme|templates|rootfs|app-dir)(?:=(.*))?$/.exec(argv[i]);
-		if (!m) { if (argv[i] === '--keep-uniwrt') o.keepUniwrt = true; else if (argv[i] === '--synthetic') o.synthetic = true; else if (argv[i] === '--no-synthetic') o.synthetic = false; else if (argv[i] === '-h' || argv[i] === '--help') o.help = true; else o.bad = argv[i]; continue; }
+		if (!m) { if (argv[i] === '--keep-uniwrt') o.keepUniwrt = true; else if (argv[i] === '--synthetic') o.synthetic = true; else if (argv[i] === '--no-synthetic') o.synthetic = false; else if (argv[i] === '--demo') o.demo = true; else if (argv[i] === '-h' || argv[i] === '--help') o.help = true; else o.bad = argv[i]; continue; }
 		const v = (m[2] !== undefined) ? m[2] : argv[++i];
 		if (m[1] === 'app-dir') (o.appDirs = o.appDirs || []).push(v);
 		else o[m[1].replace(/-(\w)/g, (_, c) => c.toUpperCase())] = v;
@@ -38,7 +41,7 @@ function parseArgs(argv) {
 	return o;
 }
 
-const USAGE = 'usage: server.js --mirror <dir> [--port 8025] [--theme-dir <htdocs/luci-static/name>] [--theme <name>] [--templates <dir>] [--rootfs <dir>] [--app-dir <pkg>]... [--keep-uniwrt] [--no-synthetic]';
+const USAGE = 'usage: server.js --mirror <dir> [--port 8025] [--theme-dir <htdocs/luci-static/name>] [--theme <name>] [--templates <dir>] [--rootfs <dir>] [--app-dir <pkg>]... [--keep-uniwrt] [--no-synthetic] [--demo]';
 const opts = parseArgs(process.argv.slice(2));
 if (opts.help || opts.bad || !opts.mirror) {
 	console.error(opts.bad ? `unknown argument ${opts.bad}\n${USAGE}` : USAGE);
@@ -78,7 +81,7 @@ for (const d of appDirs) {
 	}
 }
 
-const store = new Store(path.resolve(opts.mirror), { synthetic: opts.synthetic });
+const store = new Store(path.resolve(opts.mirror), { synthetic: opts.synthetic, demo: !!opts.demo });
 
 /* --------------------------------------------------------------- device */
 
@@ -568,5 +571,6 @@ server.listen(port, '127.0.0.1', () => {
 	console.error(`[replay] static: ${[ themeDir, ...appDirs.map(d => path.join(d, 'htdocs')), ...store.staticDirs, path.join(rootfs, 'www') ].filter(Boolean).join(', ')}`);
 	if (appDirs.length) console.error(`[replay] apps: ${appDirs.join(', ')} (menu: ${Object.keys(appMenu).join(', ') || 'none'})`);
 	console.error(`[replay] ${store.exact.size} recorded calls, ${store.series.size} time series (${store.interval} ms), ${store.exec.size} exec outputs`);
+	if (store.demo) console.error(`[replay] DEMO mode: recording pseudonymised (${store.demo.macs.size} MACs, ${store.demo.v4nets.size + store.demo.v4other.size} IPv4 networks/addresses, ${store.demo.v6nets.size} IPv6 prefixes, ${store.demo.names.size} names)`);
 	console.error(`[replay] synthetic data ${store.synthetic ? 'ON (realtime stats, conntrack list, wifi scan; --no-synthetic to disable)' : 'OFF'}`);
 });
