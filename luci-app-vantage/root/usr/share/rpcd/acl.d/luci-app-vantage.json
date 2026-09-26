@@ -1,0 +1,38 @@
+{
+	"luci-app-vantage": {
+		"description": "Vantage dashboard: read-only status of the device, uplink, radios and stations (exposes the wireless configuration including Wi-Fi keys through luci-rpc getWirelessDevices)",
+		"read": {
+			"file": {
+				"/proc/stat": [ "read" ]
+			},
+			"ubus": {
+				"file": [ "read" ],
+				"system": [ "board", "info" ],
+				"network.interface": [ "dump" ],
+				"network.device": [ "status" ],
+				"network.rrdns": [ "lookup" ],
+				"luci-rpc": [ "getHostHints", "getWirelessDevices" ],
+				"iwinfo": [ "assoclist", "info" ],
+				"hostapd.*": [ "get_clients", "get_status" ],
+				"umdns": [ "hosts" ],
+				"uci": [ "get" ]
+			},
+			"uci": [ "vantage" ]
+		}
+	},
+	"luci-app-vantage-names": {
+		"description": "Vantage dashboard: name stations (writes /etc/config/vantage only)",
+		"read": {
+			"ubus": {
+				"uci": [ "get" ]
+			},
+			"uci": [ "vantage" ]
+		},
+		"write": {
+			"ubus": {
+				"uci": [ "add", "commit", "delete", "set" ]
+			},
+			"uci": [ "vantage" ]
+		}
+	}
+}

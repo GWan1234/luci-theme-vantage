@@ -1,0 +1,6 @@
+# private LuCI data mirror (never commit)
+/mirror/
+*.jsonl
+
+# local SDK build output
+/dist/
