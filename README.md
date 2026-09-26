@@ -85,16 +85,26 @@ without the app.
 ## Install
 
 For OpenWrt 25.12 (apk). Both packages are architecture-independent, so
-the same files install on any target. Prebuilt packages are not published
-yet; build them as shown below, copy them to the device, then:
+the same files install on any target. Get them from a
+[release](https://github.com/anothaDev/luci-theme-vantage/releases) or
+[build them](#build), then, with the files in the current directory
+(`192.0.2.1` stands for your router's address):
 
 ```sh
-apk add --allow-untrusted ./luci-theme-vantage-*.apk ./luci-app-vantage-*.apk
+sha256sum -c SHA256SUMS
+scp -O luci-theme-vantage-*.apk luci-app-vantage-*.apk root@192.0.2.1:/tmp/
+ssh root@192.0.2.1 'apk add --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
 ```
 
-On a fresh install the theme selects itself; an upgrade never overrides the
-theme you chose (System → Language and Style). Removing the theme switches
-LuCI back to Bootstrap, or to another installed theme.
+Log out of LuCI and back in; the dashboard is now the landing page. On a
+fresh install the theme selects itself; an upgrade never overrides the
+theme you chose (System → System → Language and Style). Removing the theme
+switches LuCI back to Bootstrap.
+
+**[The install guide](docs/INSTALL.md)** covers requirements, verifying
+the packages, installing only one of them, upgrades, uninstalling,
+building Vantage into your own firmware, troubleshooting, and a
+ready-made prompt for installing with a coding agent.
 
 ## Build
 
@@ -135,7 +145,8 @@ See [`dev/replay/README.md`](dev/replay/README.md) for all options,
 [`docs/SPEC.md`](docs/SPEC.md) for the product and
 [`docs/luci-contract.md`](docs/luci-contract.md) for what LuCI expects from a
 theme. `dev/icons/build.js` generates the status icon set; `prototypes/`
-holds the design prototypes the packages were made from.
+holds the design prototypes the packages were made from. Coding agents
+working on the repository should read [`AGENTS.md`](AGENTS.md).
 
 Checks:
 
@@ -173,6 +184,16 @@ node security-tests/test_acl_policy.js
 |---|---|
 | 25.12 | Built with the 25.12 SDK and tested |
 | 24.10 | Untested; LuCI contract differences are not verified |
+
+## Contributing
+
+Issues and pull requests are welcome; see
+[`CONTRIBUTING.md`](CONTRIBUTING.md). A bug report should include your
+OpenWrt version (`cat /etc/openwrt_release`), your browser, and
+screenshots taken with the replay's `--demo` mode or with personal data
+removed: no real IP addresses, MACs or SSIDs. Report security problems
+privately as described in [`SECURITY.md`](SECURITY.md), not in a public
+issue.
 
 ## License
 

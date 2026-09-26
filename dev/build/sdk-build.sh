@@ -43,5 +43,13 @@ podman run --rm --userns=keep-id \
 out="$repo/dist/$release"
 mkdir -p "$out"
 find "$work/artifacts/bin" -type f \( -name 'luci-*-vantage*.apk' -o -name 'luci-*-vantage*.ipk' \) -exec cp -v {} "$out/" \;
-( cd "$out" && sha256sum -- *.apk *.ipk 2>/dev/null | tee SHA256SUMS )
-echo "built $rev for OpenWrt $release -> $out (work dir: $work)"
+(
+	cd "$out"
+	shopt -s nullglob
+	pkgs=(*.apk *.ipk)
+	[ ${#pkgs[@]} -gt 0 ] || { echo "no packages were produced" >&2; exit 1; }
+	sha256sum -- "${pkgs[@]}" | tee SHA256SUMS
+)
+# the clone and SDK output are only needed to debug a failed build
+case $work in "${TMPDIR:-/tmp}"/vantage-build.?*) rm -rf -- "$work" ;; esac
+echo "built $rev for OpenWrt $release -> $out"
