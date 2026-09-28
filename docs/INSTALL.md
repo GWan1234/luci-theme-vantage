@@ -160,6 +160,14 @@ Upgrades then come with the rest of your packages:
 apk update && apk upgrade luci-theme-vantage luci-app-vantage
 ```
 
+**Switching from a file install:** when a package was installed from a
+`.apk` file, apk pins that exact file in `/etc/apk/world`
+(`luci-theme-vantage><Q1…`), so `apk upgrade` keeps it. After adding the
+key and the repository, run `apk add luci-theme-vantage luci-app-vantage`
+once: it replaces the pins with plain names and installs the repository
+version. From then on `apk upgrade` works. Check with
+`grep vantage /etc/apk/world` (plain names, no `><`).
+
 To stop trusting the project, delete the key and the repository line:
 `rm /etc/apk/keys/vantage-signing.pem`, then remove the line from
 `/etc/apk/repositories.d/customfeeds.list`. Installed packages stay.
@@ -491,6 +499,10 @@ With the [signed repository](#signed-repository):
 ```sh
 apk update && apk upgrade luci-theme-vantage luci-app-vantage
 ```
+
+(If you first installed from files, run
+`apk add luci-theme-vantage luci-app-vantage` once instead; see
+[Switching from a file install](#signed-repository).)
 
 With files: get the newer ones, check their hashes as above, copy them to `/tmp`, then:
 
