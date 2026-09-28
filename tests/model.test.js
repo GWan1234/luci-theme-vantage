@@ -205,6 +205,47 @@ test('build: user alias wins over every other source', () => {
 	assert.equal(c.aliasSid, 'cfg01');
 });
 
+test('build: plugin-shaped wireless data (no iwinfo part) takes BSSID and SSID from iwinfo info', () => {
+	const r = raw();
+	for (const radio of Object.values(r.wifi)) { delete radio.iwinfo; radio.interfaces.forEach(i => { delete i.iwinfo; }); }
+	r.iwinfo['phy2g-ap1'] = { ssid: 'Legacy', bssid: '02:00:5E:00:53:A1' };
+	r.iwinfo['phy6g-ap0'].bssid = '02:00:5E:00:53:A2';
+	const m = model.build(r);
+	assert.deepEqual(m.ssids.map(s => s.bssid), [ '', '02:00:5E:00:53:A1', '02:00:5E:00:53:A2' ]);
+	assert.equal(m.radios[0].channel, 6);
+	assert.equal(m.radios[1].freq, 5975);
+	assert.equal(m.clients.length, 2);
+});
+
+test('build: mDNS names only when uncontested, below DHCP host names', () => {
+	const r = raw();
+	r.hints['00:00:5E:00:53:01'] = { ipaddrs: [ '192.0.2.44' ], ip6addrs: [] };
+	r.hints['02:00:5E:00:53:02'] = { ipaddrs: [ '192.0.2.45' ], ip6addrs: [] };
+	r.hapd = {};
+	r.mdns = { '192.0.2.44': 'printer-mdns', '192.0.2.45': 'phone-mdns' };
+	let [ a, b ] = model.build(r).clients;
+	assert.deepEqual([ a.nameSource, a.name, b.nameSource, b.name ], [ 'mdns', 'printer-mdns', 'mdns', 'phone-mdns' ]);
+
+	/* the DHCP host name of the station's own MAC outranks mDNS */
+	r.hints['00:00:5E:00:53:01'].name = 'printer-dhcp';
+	a = model.build(r).clients[0];
+	assert.deepEqual([ a.nameSource, a.name ], [ 'dhcp', 'printer-dhcp' ]);
+	delete r.hints['00:00:5E:00:53:01'].name;
+
+	/* one name announced for both stations' addresses labels neither */
+	r.mdns = { '192.0.2.44': 'Dads-iPhone', '192.0.2.45': 'Dads-iPhone' };
+	[ a, b ] = model.build(r).clients;
+	assert.notEqual(a.nameSource, 'mdns');
+	assert.notEqual(b.nameSource, 'mdns');
+
+	/* an address both stations claim in their hints names neither */
+	r.hints['02:00:5E:00:53:02'].ipaddrs = [ '192.0.2.44' ];
+	r.mdns = { '192.0.2.44': 'printer-mdns' };
+	[ a, b ] = model.build(r).clients;
+	assert.notEqual(a.nameSource, 'mdns');
+	assert.notEqual(b.nameSource, 'mdns');
+});
+
 test('build: empty or broken replies give an empty model, not an exception', () => {
 	const m = model.build({ wifi: { radio0: null }, assoc: { x: 'nope' }, info: 'junk' });
 	assert.deepEqual(m.clients, []);

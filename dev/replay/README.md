@@ -10,7 +10,51 @@ Nothing is forwarded anywhere; there is no upstream.
         [--app-dir <luci-app package dir>]... [--keep-uniwrt] [--no-synthetic] \
         [--demo]
 
-Open <http://127.0.0.1:8025/>. Any username/password logs in.
+Open <http://127.0.0.1:8025/>. Any username/password logs in; the session
+lasts until the replay restarts (log in again after a restart).
+
+## Trust model
+
+The templates (`--templates`, `--theme-dir`, the theme and `--app-dir`
+packages) and the `--rootfs` dump are **code**: `ut.js` compiles every
+`.ut` file to a JavaScript function that runs in the replay's Node process
+with your privileges, and nothing stops a template from reaching the file
+system or starting programs. The scope handling in `ut.js` gives ucode
+semantics; it is not a sandbox (a function literal alone leads to the
+`Function` constructor). Use only themes and dumps you trust, such as your
+own work, LuCI's, and a dump of your own device. For a third-party theme or
+a dump of a device you do not control, run the replay in a disposable
+container or as a separate unprivileged user, with the inputs mounted
+read-only, only the 127.0.0.1 port reachable, and no credentials in the
+environment. Recorded data and HTTP requests only ever reach templates as
+values; they are never compiled.
+
+## Requests the replay refuses
+
+The replay listens on 127.0.0.1 only, and on top of that:
+
+- Requests whose `Host` is not `127.0.0.1:<port>`, `localhost:<port>` or
+  `[::1]:<port>` get `421` (DNS rebinding: a web page cannot re-point its
+  own name at the replay and read it).
+- POSTs that a browser marks as cross-site (`Sec-Fetch-Site` other than
+  `same-origin`/`none`, or a foreign `Origin`) get `403` (CSRF).
+- `/ubus` takes `Content-Type: application/json` only (what LuCI's `rpc.js`
+  sends), so a cross-site `text/plain` "simple" request is not answered.
+- ubus calls need the session id the login created, like rpcd; without it
+  only rpcd's `unauthenticated` ACL of the rootfs applies
+  (`session.access/login`, `luci.getFeatures`), everything else is
+  `-32002 Access denied`. `/cgi-bin/cgi-exec` needs that session id too,
+  and `/admin/uci/*` the login cookie or `?sid=`.
+- uci names that libuci refuses (and `__proto__`, `constructor`,
+  `prototype`) answer `[2]` (INVALID_ARGUMENT) and never touch the overlay.
+- Every response has `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, a same-origin referrer policy and
+  resource/opener policies; HTML pages get a CSP (`'self'`, with the inline
+  and eval'd script LuCI needs, `frame-ancestors 'none'`). The 404 page
+  shows the requested path entity-encoded, as upstream's dispatcher does.
+- Paths with control characters get `400`, and every request-derived value
+  on stderr has control characters escaped (`\x1b`), so a URL cannot drive
+  your terminal (title, clipboard, fake log lines).
 
 Inputs:
 
@@ -42,8 +86,9 @@ gets a built-in minimal header/footer shell (`#topmenu`, `#tabmenu`,
 
 ## Page rendering
 
-There is no `ucode` on the host, so `ut.js` compiles `.ut` templates to
-JavaScript: `{{ }}`, `{% %}`, `{# #}`, whitespace trimming, colon blocks
+The replay renders templates with `ut.js`, which compiles `.ut` files to
+JavaScript (a host `ucode` is not needed; `tests/plugin.test.js` can use
+one through `$UCODE` to run the app's rpcd plugin for real): `{{ }}`, `{% %}`, `{# #}`, whitespace trimming, colon blocks
 (`if:/elif/else/endif`, `for`, `while`, `function`), ucode `for-in`
 semantics, JSON interpolation in template literals, `import {…} from`.
 Unknown names read as `null`, like ucode. The real core `view.ut`,
@@ -75,6 +120,15 @@ Routing follows the device dispatcher: the recorded menu
   `network(.interface)` actions answer success and are dropped.
 - `file.exec` and `/cgi-bin/cgi-exec` answer from recorded outputs by exact
   argv; otherwise NOT_FOUND / 403. Other `/cgi-bin/cgi-*` are refused.
+- Plugins: every `dev/replay/<name>-plugin.js` is loaded at start and
+  answers the ubus object(s) it names, before the recording is consulted.
+  A plugin stands in for an rpcd plugin the replay cannot run and exports
+  `OBJECT` (or `OBJECTS: [...]`), `call(store, method, args)` returning
+  `{ result: [ status, data? ] }`, and optionally `POLICY`
+  (`{ method: { arg: type } }`, used for `list`). It may use the store's
+  `data()`, `call()`, `uci()`, `uciGet()` and `uciSeed()`. The replay
+  prints the loaded plugins at start
+  (`vantage-plugin.js`: `luci.vantage`, luci-app-vantage's plugin).
 - Mirrored static files that are uhttpd's 404 page are served as 404, as on
   the device (the recorder keeps bodies, not statuses).
 
@@ -148,16 +202,30 @@ mirror and consistent within a run:
 | time zone | `UTC` / `UTC0` |
 | SSH key fingerprints in logs | a fixed `SHA256:demo...` placeholder |
 | `serial` / `serial_number` / `sn` fields | removed |
+| client names only found in DHCP log lines (`DHCPACK`, `not giving name`) | generic names, like other clients |
+| bridge ids (`8000.<mac>`), bare 12 digits after `mac`/`bssid`, a known MAC's last three bytes after `_`/`-` (`ESP_xxxxxx`), EUI-64 identifiers (`a65e60fffe112233`, colon form), solicited-node groups | the matching demo MAC / identifier |
+| DUIDs in text (`DUID ...`, `duid=`, `client-id`) | `0004 00005e0053xx...` |
+| `Serial :` lines, `SerialNumber:`, `serial=`/`sn=` in text | zeros |
+| uci free text (default-deny): any string under an option not known to be technical (`description`, `notes`, firewall rule `name`, uhttpd `commonname`/`location`/`organization`, NTP servers outside `*.pool.ntp.org`/`*.openwrt.org`, ...) unless it looks technical itself | `<option>-<n>` or `host<n>.example.net`, also where the same text appears elsewhere (nft comments, logs); fw4's default rule names and the `luci` config are kept |
 
 Kept: the device model and board name (the product), interface names,
 firmware and kernel versions, counters, rates, signal and noise values.
 
 Names are found the way `security-tests/check_private_addresses.js` finds
-mirror identifiers (its list is merged in), plus names containing spaces
-and the WPS names inside hostapd client signatures. `node --test tests/`
-runs the pseudonymiser over the mirror when it is present and requires zero
-findings from the checker's detectors and zero recorded identifiers or
-replaced originals in anything the replay can serve (`tests/demo.test.js`).
+mirror identifiers (its list is merged in: names with spaces and quotes,
+WPS names from hostapd client signatures, names from DHCP log lines).
+`node --test tests/` asks every recorded call through a demo-mode store when
+the mirror is present and requires zero findings from the checker's
+detectors and zero recorded identifiers or replaced originals, in any
+spelling, in the answers (`tests/demo.test.js`); a canary mirror in the same
+test covers the shapes above without relying on the checker's list.
+
+**Limits.** Identifiers are recognised by shape (addresses, MACs and what
+is derived from them) and by where they are recorded (the keys and log
+lines above); uci values are default-deny. Other free text, such as a
+person's name typed into a log message, a process argument or an
+interface description outside uci, is not recognised in general. Look at
+a screenshot before you share it.
 
 Files served from the mirror's `static/` directories (LuCI's own
 JavaScript) are not rewritten; some stock views contain example addresses
@@ -199,3 +267,45 @@ themes:
 The recorded device still runs the old UniWRT theme; its menu entries
 (Dashboard, System → Vantage Theme) are views that only work with that
 theme's CSS, so they are dropped from the menu unless `--keep-uniwrt`.
+
+## Recording (`dev/mirror/`)
+
+Do not run the recorders unless you mean to read your own device, over the
+wired management path.
+
+`record-browser.js` opens Chromium with a throwaway profile and a
+browser-wide DevTools interceptor (a pipe, no TCP port): every request of
+every tab, popup, worker and service worker is decided by
+`dev/mirror/policy.js` before it leaves the browser. Reads on the allowlist
+are forwarded with the body re-serialised exactly as checked and recorded;
+writes, applies, scans, uploads, other hosts and other spellings of the
+device are refused and listed in `blocked.log`. The profile is removed on
+every exit (window closed, Ctrl+C, SIGTERM, SIGHUP, an error); if the
+recorder is killed outright, the browser exits with it (the pipe closes),
+but the profile stays in `$TMPDIR/vantage-rec-profile-*`.
+
+It needs the device certificate's pin, obtained over SSH (whose host key
+you have verified), never from the TLS connection itself:
+
+    scp -O root@<device>:/etc/uhttpd.crt /tmp/device.crt
+    node dev/mirror/record-browser.js --cert /tmp/device.crt https://<device> ../vantage-mirror
+
+or, as a pin (`--spki` or `$VANTAGE_DEVICE_SPKI`; uhttpd's generated
+certificate is DER, drop `-inform der` for a PEM one):
+
+    ssh root@<device> cat /etc/uhttpd.crt | openssl x509 -inform der -pubkey -noout \
+      | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | openssl base64
+
+Chromium then accepts only that key (`--ignore-certificate-errors-spki-list`)
+instead of ignoring certificate errors. Secrets are scrubbed before
+anything is written (see the header of `policy.js`); `file.read` contents
+are kept only for a short list of non-secret system files (`/proc`, `/sys`,
+`board.json`, `rt_tables`, `sysupgrade.conf`, ...), so `rc.local` and
+crontabs replay as `<redacted>`.
+
+The recorder is an accident guard for a person clicking through stock
+LuCI, not a sandbox for hostile page JavaScript: it does not see
+WebSockets, for example. `tests/recorder-policy.test.js` covers the policy;
+`VANTAGE_BROWSER_TESTS=1 node --test tests/recorder-browser.test.js` runs
+the recorder against a local mock device in headless Chromium (second tab,
+popup, workers, profile removal, the pin).

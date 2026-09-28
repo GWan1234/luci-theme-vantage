@@ -4,6 +4,8 @@
    Loads every browser-* and ssh-* directory of a mirror (oldest first, so
    newer recordings win for identical keys), pseudonymises it with
    opts.demo (demo.js), and answers ubus calls:
+     0. plugins        dev/replay/*-plugin.js stand-ins for rpcd plugins the
+                       replay cannot run (see "Plugins" below)
      1. uci.*          in-memory overlay seeded from recorded uci.get, so
                        Save/Apply visibly work for the session
      2. session.access always granted
@@ -17,13 +19,60 @@
                        whose args select the resource)
      6. dropped writes known state-changing calls answer success
      7. anything else  [ 4 ] (UBUS_STATUS_NOT_FOUND), logged once
-   Nothing is ever forwarded: there is no upstream. */
+   Nothing is ever forwarded: there is no upstream.
+
+   Plugins: every dev/replay/<name>-plugin.js is loaded at start. It exports
+     OBJECT (or OBJECTS: [ ... ])  the ubus object name(s) it answers
+     call(store, method, args)     -> { result: [ status, data? ] } | { error }
+     POLICY (optional)             { method: { arg: type } }, for `list`
+   and may use the store API (data, call, uci, uciGet, uciSeed).
+
+   The uci overlay keeps configs and sections in prototype-less objects and
+   refuses names libuci would refuse (uci_validate_name), so a request can
+   neither reach Object.prototype nor create state the device could not. */
 
 const fs = require('fs');
 const path = require('path');
 const { Synthetic } = require('./synthetic');
 
 const NOT_FOUND = 4;
+const INVALID_ARGUMENT = 2;
+
+const hasOwn = (o, k) => o != null && Object.prototype.hasOwnProperty.call(o, k);
+/* libuci: config names [A-Za-z0-9_-], section/option/type names [A-Za-z0-9_] */
+const UCI_CONFIG = /^[A-Za-z0-9_-]{1,64}$/;
+const UCI_NAME = /^[A-Za-z0-9_]{1,64}$/;
+const UNSAFE_KEY = new Set([ '__proto__', 'constructor', 'prototype' ]);
+const uciName = (v, re) => typeof v === 'string' && re.test(v) && !UNSAFE_KEY.has(v);
+
+/* request-derived text on the terminal: control characters (C0, DEL, C1,
+   which some terminals read as CSI) escaped */
+const safe = s => String(s).replace(/[\x00-\x1f\x7f-\x9f]/g, c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+
+/* deep copy with prototype-less objects (uci state) */
+function nclone(v) {
+	if (Array.isArray(v)) return v.map(nclone);
+	if (v && typeof v === 'object') {
+		const o = Object.create(null);
+		for (const k of Object.keys(v)) if (!UNSAFE_KEY.has(k)) o[k] = nclone(v[k]);
+		return o;
+	}
+	return v;
+}
+
+/* optional stand-ins for rpcd plugins: dev/replay/<name>-plugin.js */
+function loadPlugins() {
+	const plugins = new Map();
+	let files = [];
+	try { files = fs.readdirSync(__dirname).filter(f => /^[a-z0-9_-]+-plugin\.js$/.test(f)).sort(); } catch (e) {}
+	for (const f of files) {
+		const mod = require(path.join(__dirname, f));
+		const objects = Array.isArray(mod.OBJECTS) ? mod.OBJECTS : [ mod.OBJECT ];
+		if (typeof mod.call !== 'function') continue;
+		for (const o of objects) if (typeof o === 'string' && o) plugins.set(o, mod);
+	}
+	return plugins;
+}
 
 /* state-changing calls a page may make on Save/Apply; answered with
    success and dropped */
@@ -77,6 +126,7 @@ class Store {
 		this.warned = new Set();
 		this.interval = 5000;
 		this.t0 = Date.now();
+		this.plugins = (this.opts.plugins === false) ? new Map() : loadPlugins();
 		this.load(mirror);
 		/* --demo: rewrite every recorded reply before anything reads it */
 		if (this.opts.demo) this.demo = require('./demo').pseudonymiseStore(this, mirror, argsKey);
@@ -139,9 +189,9 @@ class Store {
 
 	warn(kind, what) {
 		const k = kind + ' ' + what;
-		if (this.warned.has(k)) return;
+		if (this.warned.has(k) || this.warned.size >= 4096) return;
 		this.warned.add(k);
-		console.error(`[replay] ${kind}: ${what}`);
+		console.error(`[replay] ${kind}: ${safe(what)}`);
 	}
 
 	/* current sample of a series; system.info keeps uptime/localtime moving
@@ -163,6 +213,7 @@ class Store {
 	call(object, method, args) {
 		args = (args && typeof args === 'object') ? args : {};
 		const sig = `${object}.${method} ${argsKey(args)}`;
+		if (typeof object === 'string' && this.plugins.has(object)) return this.plugins.get(object).call(this, method, args);
 		if (object === 'uci') return this.uci(method, args);
 		if (object === 'session' && method === 'access') return { result: [ 0, { access: true } ] };
 		if (this.synthetic) {
@@ -205,9 +256,15 @@ class Store {
 
 	list(params) {
 		if (!Array.isArray(params) || !params.length)
-			return [ ...new Set([ ...this.objects.keys(), 'session', 'uci' ]) ].sort();
+			return [ ...new Set([ ...this.objects.keys(), ...this.plugins.keys(), 'session', 'uci' ]) ].sort();
 		const rv = {};
 		for (const o of params) {
+			const plugin = typeof o === 'string' && this.plugins.get(o);
+			if (plugin && plugin.POLICY && typeof plugin.POLICY === 'object') {
+				rv[o] = {};
+				for (const [ name, sig ] of Object.entries(plugin.POLICY)) rv[o][name] = Object.assign({}, sig);
+				continue;
+			}
 			const m = this.objects.get(o);
 			if (!m) continue;
 			rv[o] = {};
@@ -231,25 +288,25 @@ class Store {
 	/* ---------------------------------------------------------- uci overlay */
 
 	uciInit() {
-		this.uciCommitted = {};
+		this.uciCommitted = Object.create(null);
 		for (const [ key, reply ] of this.exact) {
 			const [ obj, method, a ] = key.split('\0');
 			if (obj !== 'uci' || method !== 'get') continue;
 			const args = JSON.parse(a);
-			if (Object.keys(args).length !== 1 || typeof args.config !== 'string') continue;
+			if (Object.keys(args).length !== 1 || !uciName(args.config, UCI_CONFIG)) continue;
 			const r = reply.result;
-			if (Array.isArray(r) && r[0] === 0 && r[1] && r[1].values) this.uciCommitted[args.config] = r[1].values;
+			if (Array.isArray(r) && r[0] === 0 && r[1] && r[1].values && typeof r[1].values === 'object') this.uciCommitted[args.config] = nclone(r[1].values);
 		}
-		this.uciStaged = clone(this.uciCommitted);
-		this.uciChanges = {};
+		this.uciStaged = nclone(this.uciCommitted);
+		this.uciChanges = Object.create(null);
 	}
 
 	/* a config a package ships (e.g. /etc/config/vantage) and the mirror
 	   has not recorded: known from now on, so 'uci get' answers it */
 	uciSeed(config, values) {
-		if (this.uciCommitted[config] || !values || typeof values !== 'object') return false;
-		this.uciCommitted[config] = clone(values);
-		this.uciStaged[config] = clone(values);
+		if (!uciName(config, UCI_CONFIG) || hasOwn(this.uciCommitted, config) || !values || typeof values !== 'object') return false;
+		this.uciCommitted[config] = nclone(values);
+		this.uciStaged[config] = nclone(values);
 		return true;
 	}
 
@@ -260,37 +317,48 @@ class Store {
 	}
 
 	uciChange(config, entry) {
-		(this.uciChanges[config] = this.uciChanges[config] || []).push(entry);
+		if (!hasOwn(this.uciChanges, config)) this.uciChanges[config] = [];
+		this.uciChanges[config].push(entry);
 	}
 
 	uciCommit(config) {
-		for (const c of config ? [ config ] : Object.keys(this.uciChanges)) {
-			if (this.uciStaged[c]) this.uciCommitted[c] = clone(this.uciStaged[c]);
+		for (const c of config != null ? [ config ] : Object.keys(this.uciChanges)) {
+			if (!uciName(c, UCI_CONFIG)) continue;
+			if (hasOwn(this.uciStaged, c)) this.uciCommitted[c] = nclone(this.uciStaged[c]);
 			delete this.uciChanges[c];
 		}
 	}
 
 	uciRevert(config) {
-		for (const c of config ? [ config ] : Object.keys(this.uciChanges)) {
-			if (this.uciCommitted[c]) this.uciStaged[c] = clone(this.uciCommitted[c]);
+		for (const c of config != null ? [ config ] : Object.keys(this.uciChanges)) {
+			if (!uciName(c, UCI_CONFIG)) continue;
+			if (hasOwn(this.uciCommitted, c)) this.uciStaged[c] = nclone(this.uciCommitted[c]);
 			delete this.uciChanges[c];
 		}
 	}
 
 	/* committed values, for server-side templates */
 	uciGet(config, section, option) {
-		const c = this.uciCommitted[config];
+		const c = hasOwn(this.uciCommitted, config) ? this.uciCommitted[config] : null;
 		if (!c) return null;
 		if (section == null) return c;
-		const s = c[section] || Object.values(c).find(x => x['.name'] === section);
+		const s = hasOwn(c, section) ? c[section] : Object.values(c).find(x => x && x['.name'] === section);
 		if (!s) return null;
-		return (option == null) ? s : (s[option] ?? null);
+		return (option == null) ? s : (hasOwn(s, option) ? s[option] ?? null : null);
 	}
 
 	uci(method, a) {
 		const ok = data => ({ result: data === undefined ? [ 0 ] : [ 0, data ] });
 		const nf = () => ({ result: [ NOT_FOUND ] });
-		const conf = this.uciStaged[a.config];
+		const inval = () => ({ result: [ INVALID_ARGUMENT ] });
+		/* names libuci would refuse never touch the overlay */
+		if (a.config != null && !uciName(a.config, UCI_CONFIG)) return inval();
+		for (const k of [ 'section', 'option', 'type', 'name' ]) if (a[k] != null && !uciName(a[k], UCI_NAME)) return inval();
+		if (a.options != null && !(Array.isArray(a.options) && a.options.every(o => uciName(o, UCI_NAME)))) return inval();
+		if (a.sections != null && !(Array.isArray(a.sections) && a.sections.every(o => uciName(o, UCI_NAME)))) return inval();
+		if (a.values != null && (typeof a.values !== 'object' || Array.isArray(a.values) || !Object.keys(a.values).every(k => uciName(k, UCI_NAME)))) return inval();
+		const conf = hasOwn(this.uciStaged, a.config) ? this.uciStaged[a.config] : null;
+		const sec = name => (conf && hasOwn(conf, name)) ? conf[name] : null;
 
 		switch (method) {
 		case 'configs':
@@ -305,9 +373,9 @@ class Store {
 				return nf();
 			}
 			if (a.section != null) {
-				const s = conf[a.section];
+				const s = sec(a.section);
 				if (!s) return nf();
-				if (a.option != null) return (s[a.option] === undefined) ? nf() : ok({ value: clone(s[a.option]) });
+				if (a.option != null) return !hasOwn(s, a.option) ? nf() : ok({ value: clone(s[a.option]) });
 				return ok({ values: clone(s) });
 			}
 			const values = {};
@@ -317,7 +385,7 @@ class Store {
 		}
 
 		case 'changes':
-			if (a.config != null) return ok({ changes: clone(this.uciChanges[a.config] || []) });
+			if (a.config != null) return ok({ changes: clone(hasOwn(this.uciChanges, a.config) ? this.uciChanges[a.config] : []) });
 			return ok({ changes: clone(this.uciChanges) });
 
 		case 'add': {
@@ -325,25 +393,27 @@ class Store {
 			let sid = a.name;
 			if (typeof sid !== 'string' || !sid) {
 				do sid = 'cfg' + Math.floor(Math.random() * 0xffffff).toString(16).padStart(6, '0');
-				while (conf[sid]);
+				while (hasOwn(conf, sid));
 			}
-			conf[sid] = { '.anonymous': !a.name, '.type': a.type, '.name': sid, '.index': Object.keys(conf).length };
+			const s = Object.create(null);
+			Object.assign(s, { '.anonymous': !a.name, '.type': a.type, '.name': sid, '.index': Object.keys(conf).length });
+			conf[sid] = s;
 			this.uciChange(a.config, [ 'add', sid, a.type ]);
 			this.uciSetValues(a.config, sid, a.values);
 			return ok({ section: sid });
 		}
 
 		case 'set':
-			if (!conf || !conf[a.section]) return nf();
+			if (!sec(a.section)) return nf();
 			this.uciSetValues(a.config, a.section, a.values);
 			return ok();
 
 		case 'delete': {
-			if (!conf || !conf[a.section]) return nf();
+			if (!sec(a.section)) return nf();
 			const opts = (a.option != null) ? [ a.option ] : Array.isArray(a.options) ? a.options : null;
 			if (opts) {
 				for (const o of opts) {
-					delete conf[a.section][o];
+					delete sec(a.section)[o];
 					this.uciChange(a.config, [ 'remove', a.section, o ]);
 				}
 			}
@@ -355,14 +425,15 @@ class Store {
 		}
 
 		case 'rename': {
-			if (!conf || !conf[a.section] || typeof a.name !== 'string') return nf();
+			if (!sec(a.section) || typeof a.name !== 'string') return nf();
 			if (a.option != null) {
-				const s = conf[a.section];
+				const s = sec(a.section);
+				if (!hasOwn(s, a.option)) return nf();
 				s[a.name] = s[a.option]; delete s[a.option];
 				this.uciChange(a.config, [ 'rename', a.section, a.option, a.name ]);
 			}
 			else {
-				const s = conf[a.section];
+				const s = sec(a.section);
 				delete conf[a.section];
 				s['.name'] = a.name; s['.anonymous'] = false;
 				conf[a.name] = s;
@@ -374,7 +445,7 @@ class Store {
 		case 'order':
 			if (!conf || !Array.isArray(a.sections)) return nf();
 			a.sections.forEach((sid, i) => {
-				if (!conf[sid]) return;
+				if (!sec(sid)) return;
 				conf[sid]['.index'] = i;
 				this.uciChange(a.config, [ 'order', sid, i ]);
 			});
@@ -402,9 +473,11 @@ class Store {
 	}
 
 	uciSetValues(config, sid, values) {
-		const s = this.uciStaged[config][sid];
+		const conf = hasOwn(this.uciStaged, config) ? this.uciStaged[config] : null;
+		const s = (conf && hasOwn(conf, sid)) ? conf[sid] : null;
+		if (!s) return;
 		for (const [ k, v ] of Object.entries(values || {})) {
-			if (k.startsWith('.')) continue;
+			if (!uciName(k, UCI_NAME)) continue;
 			if (v === '' || v == null || (Array.isArray(v) && !v.length)) {
 				delete s[k];
 				this.uciChange(config, [ 'remove', sid, k ]);
@@ -417,4 +490,4 @@ class Store {
 	}
 }
 
-module.exports = { Store, canon, argsKey };
+module.exports = { Store, canon, argsKey, safe };

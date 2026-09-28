@@ -58,12 +58,54 @@ function iconFor(name) {
 
 const SVGNS = 'http://www.w3.org/2000/svg';
 
-/* SVG elements from constant descriptions (ICONS, chart defs, chart shapes) */
+/* SVG elements from constant descriptions (ICONS, chart defs, chart
+   shapes). Tags and attribute names are closed sets written as literals:
+   anything else throws, so no caller can create script, a, foreignObject
+   or animation elements or set href, style or on* through this helper. */
+function svgNode(tag) {
+	switch (tag) {
+	case 'svg': return document.createElementNS(SVGNS, 'svg');
+	case 'path': return document.createElementNS(SVGNS, 'path');
+	case 'rect': return document.createElementNS(SVGNS, 'rect');
+	case 'circle': return document.createElementNS(SVGNS, 'circle');
+	case 'ellipse': return document.createElementNS(SVGNS, 'ellipse');
+	case 'defs': return document.createElementNS(SVGNS, 'defs');
+	case 'linearGradient': return document.createElementNS(SVGNS, 'linearGradient');
+	case 'stop': return document.createElementNS(SVGNS, 'stop');
+	}
+	throw new Error('svgEl: tag not allowed: ' + tag);
+}
+
+function svgAttr(el, k, v) {
+	v = String(v);
+	switch (k) {
+	case 'viewBox': el.setAttribute('viewBox', v); break;
+	case 'width': el.setAttribute('width', v); break;
+	case 'height': el.setAttribute('height', v); break;
+	case 'aria-hidden': el.setAttribute('aria-hidden', v); break;
+	case 'focusable': el.setAttribute('focusable', v); break;
+	case 'class': el.setAttribute('class', v); break;
+	case 'id': el.setAttribute('id', v); break;
+	case 'd': el.setAttribute('d', v); break;
+	case 'x': el.setAttribute('x', v); break;
+	case 'y': el.setAttribute('y', v); break;
+	case 'rx': el.setAttribute('rx', v); break;
+	case 'ry': el.setAttribute('ry', v); break;
+	case 'cx': el.setAttribute('cx', v); break;
+	case 'cy': el.setAttribute('cy', v); break;
+	case 'r': el.setAttribute('r', v); break;
+	case 'x1': el.setAttribute('x1', v); break;
+	case 'y1': el.setAttribute('y1', v); break;
+	case 'x2': el.setAttribute('x2', v); break;
+	case 'y2': el.setAttribute('y2', v); break;
+	case 'offset': el.setAttribute('offset', v); break;
+	default: throw new Error('svgEl: attribute not allowed: ' + k);
+	}
+}
+
 function svgEl(tag, attrs) {
-	/* dom-safe: every caller in this file passes a literal SVG tag name or one from the constant ICONS table */
-	const el = document.createElementNS(SVGNS, tag);
-	/* dom-safe: attribute names are literal keys of the callers' objects or of the constant ICONS table */
-	for (const k in (attrs || {})) el.setAttribute(k, attrs[k]);
+	const el = svgNode(tag);
+	for (const k of Object.keys(attrs || {})) svgAttr(el, k, attrs[k]);
 	return el;
 }
 
@@ -404,15 +446,17 @@ function setupChannelAnalysis() {
 			const band = /[256]$/.exec(tab.getAttribute('data-tab') || '');
 			setAttr(hostEl, 'data-v-band', band ? band[0] : null);
 
-			/* table rows: colour dot -> BSSID; the view's "Local Interface" row is ours */
+			/* table rows: colour dot -> BSSID. A row is ours only when its
+			   BSSID is one of this device's: the SSID cell is whatever a
+			   neighbour broadcasts, "Local Interface" included. Until the
+			   BSSIDs are known nothing is marked (the stock look). */
 			const mineByColour = new Map();
 			tab.querySelectorAll('tr').forEach(tr => {
 				const dot = tr.querySelector('span[style*="color"]');
 				const cells = tr.querySelectorAll(':scope > td, :scope > .td');
 				if (!cells.length) return;
 				const bssid = cells[cells.length - 1].textContent.trim().toUpperCase();
-				const local = cells.length > 1 && cells[1].textContent.indexOf('Local Interface') >= 0;
-				const mine = local || own.has(bssid);
+				const mine = own.has(bssid);
 				if (tr.classList.contains('v-ca-own') !== mine) tr.classList.toggle('v-ca-own', mine);
 				if (!dot) return;
 				const colour = dot.style.color;
@@ -425,7 +469,8 @@ function setupChannelAnalysis() {
 				const label = g.querySelector(':scope > text');
 				if (!poly) return;
 				const colour = poly.style.stroke;
-				const mine = mineByColour.has(colour) || !!(label && label.textContent === 'Local Interface');
+				/* LuCI derives each network's colour from its BSSID */
+				const mine = mineByColour.has(colour);
 				const slot = slotFor(colour, mine);
 				let shape = g.querySelector(':scope > path.v-ca-shape');
 				if (!shape) {

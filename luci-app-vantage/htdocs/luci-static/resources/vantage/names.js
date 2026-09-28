@@ -10,8 +10,13 @@
 
      alias   the user's own name (uci vantage, section type client)
      dns     reverse DNS of the station's address (network.rrdns)
-     mdns    mDNS host announcement (umdns hosts)
-     dhcp    a hostname in LuCI's host hints (DHCP lease on routers)
+     dhcp    a hostname in LuCI's host hints (DHCP lease on routers);
+             keyed by the station's own MAC
+     mdns    mDNS host announcement (umdns hosts). Unauthenticated, and
+             umdns does not say who sent it, so any host on the LAN can
+             claim any address: used only below DNS and DHCP, and only
+             when uncontested (one name for the address, one station for
+             the name; see mdnsMap and mdnsForStations)
      wps     the device name the station sends in its WPS element
      vendor  manufacturer from the OUI of a globally unique MAC
      private "Private device" for a locally administered MAC
@@ -20,6 +25,9 @@
    Pure functions; names are untrusted and only ever rendered as text. */
 
 var NAME_MAX = 48;
+/* client sections read from /etc/config/vantage; the rpcd plugin refuses
+   to store more */
+var ALIAS_MAX = 512;
 
 /* C0 (incl. tab, CR, LF), DEL and C1 controls */
 var CONTROL = /[\u0000-\u001f\u007f-\u009f]/;
@@ -57,6 +65,7 @@ function str(v) { return typeof v === 'string' ? v : ''; }
 
 return baseclass.extend({
 	NAME_MAX: NAME_MAX,
+	ALIAS_MAX: ALIAS_MAX,
 	SOURCES: SOURCES,
 	ICONS: ICONS,
 
@@ -163,11 +172,12 @@ return baseclass.extend({
 	},
 
 	/* uci vantage -> { 'aa:bb:..': { sid, name, icon } }; invalid MACs and
-	   empty names are skipped, the first section for a MAC wins */
+	   empty names are skipped, the first section for a MAC wins, sections
+	   past ALIAS_MAX are ignored */
 	aliasMap: function(sections) {
-		var out = Object.create(null), self = this;
+		var out = Object.create(null), self = this, n = 0;
 		(Array.isArray(sections) ? sections : []).forEach(function(s) {
-			if (!s || s['.type'] !== 'client') return;
+			if (!s || s['.type'] !== 'client' || ++n > ALIAS_MAX) return;
 			var mac = self.normMac(s.mac), v = self.validateAlias(s.name);
 			if (!mac || out[mac] || !v.ok || !v.value) return;
 			out[mac] = { sid: str(s['.name']), name: v.value, icon: self.validIcon(s.icon) };
@@ -176,17 +186,51 @@ return baseclass.extend({
 	},
 
 	/* umdns hosts reply { 'name.local': { ipv4: '...', ipv6: '...' } }
-	   -> { ip: name } */
+	   -> { ip: name }. An address claimed by two different names is left
+	   out: umdns caches unsolicited answers from anyone, so a second claim
+	   is either a conflict or a spoof, and neither names the station. */
 	mdnsMap: function(hosts) {
-		var out = Object.create(null), self = this;
+		var out = Object.create(null), bad = Object.create(null), self = this;
 		if (!hosts || typeof hosts !== 'object') return out;
 		Object.keys(hosts).forEach(function(host) {
 			var h = hosts[host], name = self.cleanHostname(host);
 			if (!name || !h || typeof h !== 'object') return;
 			[ 'ipv4', 'ipv6' ].forEach(function(k) {
 				var v = h[k];
-				(Array.isArray(v) ? v : [ v ]).forEach(function(ip) { if (typeof ip === 'string' && ip && !out[ip]) out[ip] = name; });
+				(Array.isArray(v) ? v : [ v ]).forEach(function(ip) {
+					if (typeof ip !== 'string' || !ip || bad[ip]) return;
+					if (!out[ip]) out[ip] = name;
+					else if (out[ip] !== name) { delete out[ip]; bad[ip] = true; }
+				});
 			});
+		});
+		return out;
+	},
+
+	/* The part of an mdnsMap that may name these stations
+	   ([ { mac, ips } ]): an address that belongs to more than one station
+	   names none of them, and a name that would land on more than one
+	   station is dropped for all of them, so one announcement cannot label
+	   a second device. -> { ip: name } */
+	mdnsForStations: function(map, stations) {
+		var owners = Object.create(null), byName = Object.create(null), out = Object.create(null), self = this;
+		if (!map) return out;
+		(Array.isArray(stations) ? stations : []).forEach(function(s) {
+			var mac = s && self.normMac(s.mac);
+			if (!mac) return;
+			(Array.isArray(s.ips) ? s.ips : []).forEach(function(ip) {
+				if (typeof ip !== 'string') return;
+				var o = owners[ip] || (owners[ip] = []);
+				if (o.indexOf(mac) < 0) o.push(mac);
+			});
+		});
+		Object.keys(owners).forEach(function(ip) {
+			if (owners[ip].length !== 1 || !Object.prototype.hasOwnProperty.call(map, ip)) return;
+			var name = map[ip], macs = byName[name] || (byName[name] = []);
+			if (macs.indexOf(owners[ip][0]) < 0) macs.push(owners[ip][0]);
+		});
+		Object.keys(owners).forEach(function(ip) {
+			if (owners[ip].length === 1 && Object.prototype.hasOwnProperty.call(map, ip) && byName[map[ip]].length === 1) out[ip] = map[ip];
 		});
 		return out;
 	},
@@ -213,8 +257,8 @@ return baseclass.extend({
 		var alias = s.alias && this.validateAlias(s.alias.name);
 		if (alias && alias.ok && alias.value) { name = alias.value; source = 'alias'; }
 		if (!name && (name = fromIps(s.rdns))) source = 'dns';
-		if (!name && (name = fromIps(s.mdns))) source = 'mdns';
 		if (!name && s.hint && (name = this.cleanHostname(s.hint.name))) source = 'dhcp';
+		if (!name && (name = fromIps(s.mdns))) source = 'mdns';
 		if (!name && s.wps && (name = fmt.safeText(str(s.wps).trim(), NAME_MAX) || null)) source = 'wps';
 
 		var tail = fmt.macTail(mac);

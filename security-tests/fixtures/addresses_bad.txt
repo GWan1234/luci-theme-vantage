@@ -22,3 +22,13 @@ first octet outside 00-0f 12:00:5e:00:53:01
 mirror hostname Example-Host-1234.lan
 mirror public address 198.18.7.9
 link-local with a 32-bit identifier fe80::1:2
+mirror SSID with spaces Example Home Net
+mirror SSID with other whitespace Example	Home   Net
+mirror SSID JSON-escaped {"ssid":"Pat's-AP"}
+mirror SSID HTML-escaped Pat&#39;s-AP and Pat&#x27;s-AP
+mirror SSID URL-encoded ?ssid=Example%20Home%20Net
+mirror SSID form-encoded ssid=Example+Home+Net
+mirror name with a quote in JSON {"hostname":"Quote\"d Host"}
+mirror name with a quote in HTML Quote&quot;d Host
+mirror SSID with angle brackets in HTML Lab &lt;AP&gt;
+mirror short hostname zed.

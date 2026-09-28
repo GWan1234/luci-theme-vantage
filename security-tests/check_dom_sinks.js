@@ -76,6 +76,21 @@
  *   property such as href, src, on* or textContent) unless o is provably a plain
  *   object; Object.defineProperties(o, p) / Object.assign(o, ...src) on such
  *   an o need object literals with harmless literal keys.
+ *   CSS from data: X.style.<prop> = v, X.style.cssText = v, X.style = v,
+ *   X.style[k] = v, X.style.setProperty(name, v) and Object.assign(X.style,
+ *   {...}) follow the style-attribute rule (v a literal or a concatenation
+ *   of literals and numeric expressions; setProperty's name a literal;
+ *   Object.assign sources object literals); a style sheet's
+ *   replaceSync(x)/insertRule(x) needs constant CSS, or x must be the first
+ *   parameter of a .then() callback on a chain that starts with
+ *   fetch(L.resource('<literal>')) (a stylesheet shipped with the package).
+ *   Selectors: querySelector/querySelectorAll/closest/matches/
+ *   webkitMatchesSelector(sel) need a constant selector or a concatenation
+ *   of literals and CSS.escape(...) (this./self.matches, the view's own
+ *   filter method, is not a selector call). RegExp(p) / new RegExp(p) need
+ *   a constant pattern (data would allow ReDoS). history.pushState/
+ *   replaceState(state, title, url): url must be URL-safe or start with
+ *   location.pathname.
  *   Always rejected as well: dynamic import(), Worker/SharedWorker,
  *   importScripts(), serviceWorker.register(), and execCommand() with a
  *   non-literal or insertHTML/insertImage command.
@@ -155,8 +170,11 @@
  * Reflect.apply on a DOM method obtained generically (e.g. through a
  * variable holding Element.prototype.setAttribute) is not modelled beyond
  * the by-name string rules; CSS-level injection through literal style is
- * out of scope; a `new window.Worker` style member path is caught only by
- * the name rule. DOM_SINKS_DEBUG=1 prints every query that could not be
+ * checked as described above; a `new window.Worker` style member path is caught only by
+ * the name rule; a style object held in a variable (`var s = el.style;
+ * s.color = x`) and CSSStyleSheet#replace() (indistinguishable from
+ * String#replace by name) are not tracked; selector and RegExp rules only
+ * see direct calls. DOM_SINKS_DEBUG=1 prints every query that could not be
  * traced.
  *
  * Usage
@@ -1523,6 +1541,41 @@ function scanUnit(prog, u, report) {
 		}
 	};
 
+	/* T[k] is `style` reached as a member (X.style) */
+	const styleRecv = (k) => isId(T[k], 'style') && (isP(T[k - 1], '.') || isP(T[k - 1], '?.'));
+	const styleValue = (i, vs, what) => {
+		const ve = exprEnd(u, vs, T.length);
+		if (!check(vs, ve, 'style'))
+			flag(i, 'css-style', `${what} \`${text(vs, ve)}\` is not a literal or literal/number concatenation (CSS from data: url() beacons, overlays)${why()}`, [vs]);
+	};
+	/* [s, e) is the first parameter of a .then() callback on a chain that
+	   starts with fetch(L.resource('<literal>')) */
+	const fetchedResource = (i, s, e) => {
+		if (e - s !== 1 || !isId(T[s])) return false;
+		const f = innermostFn(u, i);
+		if (!f || f.params[0] !== T[s].v || f.unsafe.has(T[s].v)) return false;
+		for (let j = f.bodyOpen; j < f.bodyClose; j++)
+			if (isId(T[j], T[s].v) && !isP(T[j - 1], '.') && T[j + 1] && T[j + 1].t === 'punc' && (ASSIGN_OPS.has(T[j + 1].v) || T[j + 1].v === '++' || T[j + 1].v === '--')) return false;
+		if (!(isP(T[f.start - 1], '(') && isId(T[f.start - 2], 'then') && isP(T[f.start - 3], '.'))) return false;
+		const c = chainStart(u, f.start - 3);
+		return isId(T[c], 'fetch') && isP(T[c + 1], '(') && isId(T[c + 2], 'L') && isP(T[c + 3], '.') && isId(T[c + 4], 'resource') &&
+			isP(T[c + 5], '(') && isLit(T[c + 6]) && T[c + 6].t !== 'num' && isP(T[c + 7], ')') && isP(T[c + 8], ')') && u.match[c + 1] === c + 8;
+	};
+	/* constant selector, or literals + CSS.escape(...) */
+	const selectorSafe = (s, e) => {
+		if (check(s, e, 'const')) return true;
+		return splitTop(u, s, e, '+').every(([a, b]) => (b - a === 1 && isLit(T[a])) ||
+			(isId(T[a], 'CSS') && isP(T[a + 1], '.') && isId(T[a + 2], 'escape') && isP(T[a + 3], '(') && u.match[a + 3] === b - 1));
+	};
+	/* location.pathname (+ anything): same origin, path-relative */
+	const locationPath = (s, e) => {
+		const [a] = splitTop(u, s, e, '+')[0] || [];
+		if (a === undefined) return false;
+		const p = pathAt(u, a);
+		const parts = p ? p.parts.join('.') : '';
+		return (parts === 'location.pathname' || parts === 'window.location.pathname') && p.end === splitTop(u, s, e, '+')[0][1];
+	};
+
 	for (let i = 0; i < T.length; i++) {
 		const t = T[i], prev = T[i - 1], next = T[i + 1];
 		const member = isP(prev, '.') || isP(prev, '?.');
@@ -1548,6 +1601,7 @@ function scanUnit(prog, u, report) {
 			const close = u.match[i], after = T[close + 1];
 			const isWrite = after && after.t === 'punc' && (ASSIGN_OPS.has(after.v) || after.v === '++' || after.v === '--');
 			const isCall = isP(after, '(');
+			if (isWrite && styleRecv(i - 1) && ASSIGN_OPS.has(after.v)) styleValue(i, close + 2, `style[${text(i + 1, close)}] ${after.v}`);
 			if (isWrite || isCall) {
 				if (close === i + 2 && isLit(T[i + 1])) {
 					if (isWrite) propWrite(i, String(T[i + 1].v), close + 1);
@@ -1678,6 +1732,53 @@ function scanUnit(prog, u, report) {
 		if (((t.v === 'Worker' || t.v === 'SharedWorker') && !isKeyPos(u, i)) || (t.v === 'importScripts' && !member && isP(next, '(')) ||
 			(t.v === 'register' && member && isId(T[i - 2], 'serviceWorker') && isP(next, '(')))
 			flag(i, 'code-eval', `${t.v} loads and runs a script`);
+
+		/* inline style through the CSSOM */
+		if (member && next && next.t === 'punc' && ASSIGN_OPS.has(next.v) && (styleRecv(i - 2) || t.v === 'style'))
+			styleValue(i, i + 2, `${t.v === 'style' ? '.style' : '.style.' + t.v} ${next.v}`);
+		if (t.v === 'setProperty' && member && styleRecv(i - 2) && isP(next, '(')) {
+			const [n, v] = callArgs(u, i + 1);
+			if (!n || !(n[1] - n[0] === 1 && isLit(T[n[0]])))
+				flag(i, 'css-style', `style.setProperty() with a non-literal property name \`${n ? text(n[0], n[1]) : ''}\``, n ? [n[0]] : []);
+			if (v) styleValue(i, v[0], 'style.setProperty() value');
+		}
+		if (t.v === 'assign' && member && isId(T[i - 2], 'Object') && isP(next, '(')) {
+			const args = callArgs(u, i + 1);
+			if (args[0] && styleRecv(args[0][1] - 1)) {
+				const ok = args.slice(1).every((r) => isP(T[r[0]], '{') && u.match[r[0]] === r[1] - 1 &&
+					prog.objEntries(u, r[0], r[1]).every((en) => en.kind === 'value' && en.key !== undefined && check(en.vs, en.ve, 'style')));
+				if (!ok) flag(i, 'css-style', `Object.assign() on a style object needs object literals with literal/number values${why()}`, [args[0][0]]);
+			}
+		}
+
+		/* style sheets from data */
+		if ((t.v === 'replaceSync' || t.v === 'insertRule') && member && isP(next, '(')) {
+			const a = callArgs(u, i + 1)[0];
+			if (!a || !(check(a[0], a[1], 'const') || fetchedResource(i, a[0], a[1])))
+				flag(i, 'css-sheet', `${t.v}(\`${a ? text(a[0], a[1]) : ''}\`) is not constant CSS or a stylesheet fetched from L.resource('<literal>')${why()}`, a ? [a[0]] : []);
+		}
+
+		/* selectors from data: injection or a SyntaxError */
+		if (['querySelector', 'querySelectorAll', 'closest', 'matches', 'webkitMatchesSelector'].includes(t.v) && member && isP(next, '(') &&
+			!((isId(T[i - 2], 'this') || isId(T[i - 2], 'self')) && !isP(T[i - 3], '.') && t.v === 'matches')) {
+			const a = callArgs(u, i + 1)[0];
+			if (!a || !selectorSafe(a[0], a[1]))
+				flag(i, 'css-selector', `${t.v}(\`${a ? text(a[0], a[1]) : ''}\`): selector is not constant (use CSS.escape() for data)${why()}`, a ? [a[0]] : []);
+		}
+
+		/* regular expressions from data: ReDoS */
+		if (t.v === 'RegExp' && !member && isP(next, '(') && !isKeyPos(u, i)) {
+			const a = callArgs(u, i + 1)[0];
+			if (!a || !check(a[0], a[1], 'const'))
+				flag(i, 'regexp', `RegExp(\`${a ? text(a[0], a[1]) : ''}\`) with a pattern that is not constant${why()}`, a ? [a[0]] : []);
+		}
+
+		/* history URLs */
+		if ((t.v === 'pushState' || t.v === 'replaceState') && member && isId(T[i - 2], 'history') && isP(next, '(')) {
+			const a = callArgs(u, i + 1)[2];
+			if (a && !(check(a[0], a[1], 'url') || locationPath(a[0], a[1])))
+				flag(i, 'url-prop', `history.${t.v}() URL \`${text(a[0], a[1])}\` is not URL-safe or location.pathname-based${why()}`, [a[0]]);
+		}
 
 		/* Reflect.set / Reflect.defineProperty / Object.defineProperty(ies) /
 		   Object.assign on a receiver that is not provably a plain object:

@@ -51,9 +51,10 @@ Out of scope:
 - bugs in LuCI, rpcd, uhttpd, OpenWrt or other packages that Vantage only
   uses. Report those to the OpenWrt project. If you are unsure where a
   problem belongs, report it here and we will help route it.
-- the documented behaviour that the dashboard's read permission includes
-  Wi-Fi keys (see the README's Security section), which matches LuCI's
-  own status pages
+- information that LuCI's core templates put on every page, including
+  error pages for visitors who are not logged in (the `L.env` script with
+  the LuCI build, and on 404 pages the menu tree); see
+  `docs/luci-contract.md` section 2
 
 ## What to expect
 

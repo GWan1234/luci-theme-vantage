@@ -333,7 +333,10 @@ return baseclass.extend({
 			radio.spectrum = wifi.spectrum(band, chan, radio.centre, radio.width);
 
 			ifs.forEach(function(i) {
-				var ic = obj(i.config), ifname = typeof i.ifname === 'string' ? i.ifname : null, iiw = obj(i.iwinfo);
+				var ic = obj(i.config), ifname = typeof i.ifname === 'string' ? i.ifname : null;
+				/* luci.vantage wireless has no iwinfo part: the view's
+				   per-interface iwinfo info replies stand in for it */
+				var iiw = obj(i.iwinfo || (ifname && own(iw, ifname) ? iw[ifname] : null));
 				if (ifname) { radio.ifnames.push(ifname); wlNames.push(ifname); }
 				var st = ifname ? obj(hstat[ifname]) : {};
 				var air = obj(st.airtime);
@@ -364,6 +367,18 @@ return baseclass.extend({
 		var uplink = this.resolveUplink(raw.ifaces, devs, wlNames);
 		var subnets = uplink ? uplink.ipv4 : [];
 
+		function hintOf(mac) { return obj(hints[mac.toUpperCase()] || hints[mac]); }
+
+		/* mDNS names only where they are unambiguous across all stations */
+		var everyone = [];
+		ssids.forEach(function(ss) {
+			if (ss.ifname) arr(assoc[ss.ifname]).forEach(function(s) {
+				var mac = s && names.normMac(s.mac);
+				if (mac) everyone.push({ mac: mac, ips: self.hintAddrs(hintOf(mac), subnets) });
+			});
+		});
+		var mdns = names.mdnsForStations(raw.mdns, everyone);
+
 		ssids.forEach(function(ss) {
 			if (!ss.ifname) return;
 			var hc = obj(obj(hapd[ss.ifname]).clients);
@@ -373,12 +388,12 @@ return baseclass.extend({
 				var mac = s && names.normMac(s.mac);
 				if (!mac) return;
 				var h = hmap[mac] || {}, rx = obj(s.rx), tx = obj(s.tx);
-				var hint = obj(hints[mac.toUpperCase()] || hints[mac]);
+				var hint = hintOf(mac);
 				var ips = self.hintAddrs(hint, subnets);
 				var std = wifi.clientStd(rx, tx, h);
 				var alias = raw.aliases && raw.aliases[mac];
 				var nm = names.resolve({
-					mac: mac, alias: alias, ips: ips, rdns: raw.rdns, mdns: raw.mdns,
+					mac: mac, alias: alias, ips: ips, rdns: raw.rdns, mdns: mdns,
 					hint: hint, wps: names.wpsName(h.signature),
 					vendor: typeof raw.vendor === 'function' ? raw.vendor(names.ouiKey(mac)) : null
 				});

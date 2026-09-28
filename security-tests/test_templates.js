@@ -7,7 +7,18 @@
  *
  * Renders themes/vantage/{header,footer,sysauth}.ut with the replay's ucode
  * template engine (dev/replay/ut.js) under benign and hostile inputs and
- * checks the browser-facing invariants of docs/luci-contract.md section 2:
+ * checks the browser-facing invariants of docs/luci-contract.md section 2.
+ * These assertions are about the markup the THEME emits. On the device
+ * the core header.ut wraps the theme header and adds its own
+ * `L = new LuCI({...})` script (LuCI build, pathinfo, nodespec) to every
+ * page, anonymous ones included, and core footer.ut adds its apply and
+ * media_error scripts; that is luci-base, not the theme. The last tests
+ * render the core error404 page from a device rootfs around the theme
+ * ($VANTAGE_ROOTFS, skipped without one) and track the core's anonymous
+ * leaks as known upstream failures (node:test `todo`). ut.js is not
+ * ucode: its entityencode/striptags are close stand-ins, and the HTML
+ * tokenizer below is not an HTML5 script-data tokenizer.
+ *
  *
  * - markup is stable: the tag/attribute skeleton of a hostile render equals
  *   the benign one, so no input adds an element or an attribute, and no raw
@@ -16,9 +27,9 @@
  * - inline scripts are data-free: identical for benign and hostile inputs
  *   and free of every input string;
  * - `fuser` is never echoed; the login error is generic;
- * - visitors who are not logged in (login, 404 and CSRF pages) get no menu,
- *   no menu script, no host, model or version, no dispatched page title,
- *   and the templates make no ubus call for them;
+ * - for visitors who are not logged in (login, 404 and CSRF pages) the
+ *   theme emits no menu, no menu script, no host, model or version, no
+ *   dispatched page title, and makes no ubus call;
  * - the login form posts back without an action attribute, with the
  *   contract's field names and autocomplete tokens;
  * - JSON handed to the login script arrives entity-encoded in an attribute
@@ -26,6 +37,7 @@
  */
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('fs');
 const path = require('path');
 const { Engine } = require('../dev/replay/ut');
 
@@ -84,6 +96,8 @@ function environment(o) {
 		uci: {
 			get: (c, s, opt) => {
 				calls.uci.push([ c, s, opt ].join('.'));
+				if (c === 'uhttpd' && s === 'main' && opt === 'listen_https' && o.listen !== undefined)
+					return o.listen;
 				if (c === 'uhttpd' && s === 'main' && opt === 'listen_https')
 					return o.hostile ? [ '0.0.0.0:443', '[::]:8443', '0.0.0.0:0', '0.0.0.0:70000', HOSTILE, HOSTILE + ':1' ] : [ '0.0.0.0:443', '[::]:443' ];
 				return null;
@@ -259,7 +273,6 @@ test('header: the contract hooks and script order are in place', () => {
 	assert.ok(html.indexOf('id="maincontent"') > 0 && !/<\/main>[\s\S]*<div id="view">/.test(html), '#view lands inside #maincontent');
 	assert.ok(!/id="view"/.test(engine.render(THEME + '/header', environment({ authed: true, path: ADMIN }).env, { blank_page: false })), 'the theme never emits #view');
 	/* SubstituteVersion (luci.mk) adds ?v= only to "{{ media }}/x.css" / "{{ resource }}/x.js" */
-	const fs = require('fs');
 	for (const t of [ 'header', 'sysauth' ]) {
 		const src = fs.readFileSync(path.join(TEMPLATES, THEME, t + '.ut'), 'utf8');
 		for (const m of src.matchAll(/(?:href|src)="([^"]*\.(?:css|js))"/g))
@@ -301,4 +314,103 @@ test('login form: post back without action, contract field names and autocomplet
 	assert.deepEqual(ports, [ 443, 8443, 1 ]);
 	assert.ok(ports.every(p => Number.isInteger(p) && p > 0 && p < 65536));
 	assert.equal(decode(attr(forms[0], 'data-https-probe')), '/luci-static/resources/icons/loading.svg');
+});
+
+test('login: odd uci and fuser values render without an exception and change no markup', () => {
+	/* sysauth.ut throwing would make the dispatcher fall back to the core
+	   login page (core header, core footer with media_error) */
+	const base = skeleton(renderLogin({ path: ADMIN, fuser: 'root' }).html);
+	for (const listen of [ '0.0.0.0:443 [::]:8443', '', null, 443, [ 443, null, {} ], {} ]) {
+		const r = renderLogin({ path: ADMIN, fuser: 'root', listen });
+		assert.deepEqual(skeleton(r.html), base, `listen_https=${JSON.stringify(listen)}`);
+	}
+	const ports = attrOf(renderLogin({ path: ADMIN, listen: '0.0.0.0:443 [::]:8443' }).html, 'form', 'data-https-ports');
+	assert.deepEqual(JSON.parse(decode(ports)), [ 443, 8443 ], 'a whitespace-separated listen_https string');
+	for (const fuser of [ [ 'a', 'b' ], '', 0, 'x\u0000y', '\u2028' ]) {
+		const r = renderLogin({ path: ADMIN, fuser });
+		assert.ok(!r.html.includes('x\u0000y') && !r.html.includes('\u2028'), `fuser ${JSON.stringify(fuser)} echoed`);
+	}
+});
+
+function attrOf(html, tag, name) {
+	const t = tokenize(html).tags.find(x => x.name === tag && !x.close);
+	const a = t && t.attrs.find(x => x[0] === name);
+	return a ? a[1] : undefined;
+}
+
+/* --------------------------------------- core error404 around the theme */
+
+/* A device rootfs dump provides LuCI's own templates (as for the replay). */
+const ROOTFS = process.env.VANTAGE_ROOTFS ||
+	path.join(__dirname, '../../zyxel-nwa50be-openwrt/work/flash-20260919.rO8sRE/packaged-rootfs');
+const CORE = path.join(ROOTFS, 'usr/share/ucode/luci/template');
+const HAVE_CORE = fs.existsSync(path.join(CORE, 'error404.ut')) && fs.existsSync(path.join(CORE, 'header.ut'));
+const NO_CORE = HAVE_CORE ? false : 'no LuCI core templates (set VANTAGE_ROOTFS to a device rootfs dump)';
+
+/* what dispatcher.uc hands the templates for GET /cgi-bin/luci/<x> without
+   a session: no node matches, so `dispatched` is the root of the page
+   tree (build_pagetree(), every node with its depends/satisfied) */
+const TREE = {
+	action: { type: 'firstchild' }, satisfied: true,
+	children: {
+		admin: {
+			title: 'Administration', order: 10, satisfied: true, action: { type: 'firstchild' },
+			auth: { methods: [ 'cookie:sysauth_https', 'cookie:sysauth_http' ], login: true },
+			children: {
+				dashboard: { title: SECRET.title, satisfied: true, action: { type: 'view', path: 'vantage/overview' }, depends: { acl: [ 'luci-app-vantage' ] } },
+				network: { title: 'Network', satisfied: true, depends: { fs: { '/sbin/fw3': 'executable' }, uci: { network: true } } }
+			}
+		}
+	}
+};
+
+function renderCore404(reqPath) {
+	const coreEngine = new Engine([ TEMPLATES, CORE ], {}, {});
+	const { env, calls } = environment({ authed: false, path: [] });
+	const pathinfo = '/' + reqPath.join('/');
+	env.http.getenv = k => ({ PATH_INFO: pathinfo, SCRIPT_NAME: '/cgi-bin/luci', DOCUMENT_ROOT: '/www', REQUEST_URI: '/cgi-bin/luci' + pathinfo })[k] ?? null;
+	env.ctx = Object.assign({}, env.ctx, { path: [], request_path: reqPath });
+	env.config = { main: {}, apply: {} };
+	env.dispatched = TREE;
+	env.requested = TREE;
+	env.pkgs_update_time = 1700000000;
+	env.lua_active = false;
+	const html = coreEngine.render('error404', env, { message: '' });
+	/* the core header's environment script */
+	const m = /<script>\s*L = new LuCI\(([\s\S]*?)\);\s*<\/script>/.exec(html);
+	return { html, calls, envText: m ? m[1] : null, lenv: m ? JSON.parse(m[1]) : null };
+}
+
+test('core 404 around the theme: the theme part adds nothing about the device', { skip: NO_CORE }, () => {
+	const r = renderCore404([ 'foo' ]);
+	assert.ok(r.lenv, 'found the core L.env script');
+	assert.deepEqual(r.calls.ubus, [], 'ubus called for an anonymous visitor');
+	const rest = r.html.replace(/<script>\s*L = new LuCI\([\s\S]*?\);\s*<\/script>/, '');
+	assertNoSecrets(rest, 'core 404 without the core L.env script');
+	for (const bad of [ 'vt-rail', 'menu-vantage', 'L.require' ])
+		assert.ok(!rest.includes(bad), `${bad} rendered for an anonymous visitor`);
+});
+
+test('core 404 around the theme: L.env nodespec carries no page tree for an anonymous visitor', {
+	skip: NO_CORE,
+	todo: HAVE_CORE && 'upstream luci-base: template/header.ut prints `nodespec: dispatched`, the whole page tree on an anonymous 404; ' +
+		'not fixable from a theme (docs/luci-contract.md section 2)'
+}, () => {
+	const { lenv } = renderCore404([ 'foo' ]);
+	assert.equal(lenv.sessionid, null);
+	const spec = lenv.nodespec;
+	assert.ok(spec == null || (spec.children === undefined && spec.depends === undefined),
+		'nodespec exposes ' + Object.keys(spec || {}).join(', '));
+});
+
+test('core 404 around the theme: a <!--<script> path cannot swallow the page', {
+	skip: NO_CORE,
+	todo: HAVE_CORE && 'upstream luci-base: template/header.ut escapes only "/" in the L.env JSON, not "<"; ' +
+		'the theme header runs before it and cannot repair it (docs/luci-contract.md section 2)'
+}, () => {
+	const { envText } = renderCore404([ 'foo<!--<script>' ]);
+	assert.ok(envText, 'found the core L.env script');
+	/* inside a script element, "<!--" followed by "<script" enters the
+	   double-escaped state: the element's own </script> no longer ends it */
+	assert.ok(!/<!--/.test(envText) && !/<script/i.test(envText), 'raw <!-- / <script in the L.env script');
 });

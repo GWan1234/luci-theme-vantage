@@ -148,7 +148,10 @@ class Synthetic {
 	}
 
 	announce(what) {
-		if (this.announced.has(what)) return;
+		/* what carries request arguments: no control characters on the
+		   terminal, and a bounded set however many names a client sends */
+		what = String(what).replace(/[\x00-\x1f\x7f-\x9f]/g, c => '\\x' + c.charCodeAt(0).toString(16).padStart(2, '0'));
+		if (this.announced.has(what) || this.announced.size >= 256) return;
 		this.announced.add(what);
 		console.error(`[replay] synthetic: ${what} (generated, not recorded; --no-synthetic to disable)`);
 	}

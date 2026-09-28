@@ -34,7 +34,7 @@ port in one click, finding anything by typing — not from their look.
 | Package | Contents | Depends |
 |---|---|---|
 | `luci-theme-vantage` | ucode templates, CSS, icons, `menu-vantage.js` (shell: rail, top bar, palette, tabs, indicators), login page | `+luci-base` |
-| `luci-app-vantage` | dashboard + inspector views under `admin/dashboard` (landing page), its rpcd ACL (reads + its own config only), `/etc/config/vantage` | `+luci-base +rpcd +rpcd-mod-iwinfo`; reverse DNS (`rpcd-mod-rrdns`), mDNS (`umdns`) and hostapd's ubus objects are optional and degrade |
+| `luci-app-vantage` | dashboard + inspector views under `admin/dashboard` (landing page), its rpcd ACL (reads + its own config only), its rpcd ucode plugin `luci.vantage` (key-free wireless status, validated alias writes), `/etc/config/vantage` | `+luci-base +rpcd +rpcd-mod-iwinfo +rpcd-mod-ucode +ucode-mod-uci +ucode-mod-ubus` (all but rpcd-mod-iwinfo come with luci-base); reverse DNS (`rpcd-mod-rrdns`), mDNS (`umdns`) and hostapd's ubus objects are optional and degrade |
 
 The theme is useful alone; the app works under any theme but is designed
 for Vantage. Names used everywhere: theme dir `vantage`, media URL
@@ -95,9 +95,12 @@ visible focus, reduced-motion respected.
   interface (proto, addresses, counters, rates).
 - **Client names**: every client gets a human label, resolved in order:
   user alias (rename in the inspector, stored in `/etc/config/vantage`),
-  reverse DNS (`network.rrdns`), mDNS (`umdns`, when running), IP from host
-  hints, vendor from a small built-in OUI table, or "Private Wi-Fi
-  address" for randomised MACs. Never "?". The source is shown.
+  reverse DNS (`network.rrdns`, optional grant), DHCP host name from host
+  hints, mDNS (`umdns`, when running; unauthenticated, so only below DNS
+  and DHCP and only when uncontested: an address claimed by two names, or
+  a name that would land on two stations, is not used), WPS device name,
+  vendor from a small built-in OUI table, or "Private Wi-Fi address" for
+  randomised MACs. Never "?". The source is shown.
 - **Insight over decoration**: per-client experience score with a reason,
   Wi-Fi generation badges and legacy-client flags, top talkers by live
   throughput, new/recently-gone clients, busiest radio; each insight links
@@ -108,14 +111,25 @@ visible focus, reduced-motion respected.
   down, memory > 90 %, radio disabled) each with a one-line reason and a
   link to the page that fixes it.
 - Polling via `poll.add` with sane intervals; pauses when the tab is hidden.
-- ACL: read-only ubus methods only (`system info/board`, `network.*
-  status/dump`, `network.wireless status`, `iwinfo info/assoclist`,
-  `hostapd.* get_status/get_clients`, `luci-rpc getHostHints/getWirelessDevices`,
-  `network.rrdns lookup`, `umdns hosts`, `file read` of `/proc/stat`,
-  `uci get` for `vantage`), no `file.exec`. The only write is `uci` on the
-  app's own `vantage` config (client aliases), in a separate ACL group.
-  `getWirelessDevices` returns the wifi-iface sections including keys, so
-  the read group's description says it exposes Wi-Fi keys.
+- ACL: three groups. `luci-app-vantage` (read): `system info/board`,
+  `network.interface dump`, `network.device status`, `iwinfo
+  info/assoclist`, `hostapd.* get_status/get_clients`, `luci-rpc
+  getHostHints`, `luci.vantage wireless`, `umdns hosts`, `file read` of
+  `/proc/stat`, `uci get` for `vantage`; no `file.exec`.
+  `luci-app-vantage-rdns` (read, optional): `network.rrdns lookup`, kept
+  apart because its caller chooses the DNS server and port; the view
+  checks the grant and skips reverse DNS without it.
+  `luci-app-vantage-names` (write): `luci.vantage set_alias` only; no
+  group grants uci writes.
+- rpcd ucode plugin `luci.vantage` (`/usr/share/rpcd/ucode/luci.vantage`):
+  `wireless` returns `network.wireless status` reduced to the fields the
+  view reads (no `key`, `sae_password`, RADIUS or 802.11r secrets, no EAP
+  credentials; `encryption` only as the mode string); per-interface BSSID
+  and SSID come from `iwinfo info`. `set_alias({mac, name, icon})`
+  re-applies the view's rules on the device (unicast MAC, name of at most
+  48 code points without control, bidi or invisible characters, icon from
+  the fixed list), keeps one section per MAC, refuses a new name past 512,
+  and writes and commits config `vantage` only.
 
 ## 5. Later
 
@@ -126,15 +140,28 @@ visible focus, reduced-motion respected.
 
 ## 6. Security requirements
 
-- Templates escape everything request-derived; never echo `fuser`;
-  unauthenticated renders expose nothing about the device.
+- Templates escape everything request-derived; never echo `fuser`; the
+  theme's own markup for unauthenticated renders (login, 404, CSRF) adds
+  nothing about the device. Not in the theme's control: LuCI's core
+  `header.ut` prints `L = new LuCI({...})` after the theme header on every
+  page, with the LuCI build and package-database time in the `luci.js`
+  URL and `nodespec: dispatched`, which on an anonymous 404 is the whole
+  menu tree (modules, view paths, ACL group names, `depends`). Only a
+  luci-base change can fix that (see `docs/luci-contract.md` section 2);
+  `test_templates.js` renders the core 404 around the theme and tracks it
+  as a known upstream failure.
 - No `innerHTML`/`insertAdjacentHTML`/string-built DOM with data; `E()`
-  and text nodes only (checked by `security-tests/check_dom_sinks.js`).
+  and text nodes only; style, selectors, dynamic regular expressions and
+  history URLs from data are rejected too (checked by
+  `security-tests/check_dom_sinks.js`, on the theme and the app, with no
+  `dom-safe` suppressions).
 - ACL test: the app's ACL grants only the listed read methods and every
   `rpc.declare` in the app is covered, nothing unused is granted
   (`security-tests/test_acl_policy.js`, also run by `node --test tests/`).
   The one object glob is `hostapd.*` (hostapd's ubus objects are named per
-  interface), limited to `get_clients`/`get_status`.
+  interface), limited to `get_clients`/`get_status`. No group grants a uci
+  write or reads Wi-Fi keys; the only write is the plugin's `set_alias`,
+  whose validation `tests/plugin.test.js` checks against the view's.
 - No private addresses or MACs in committed files
   (`security-tests/check_private_addresses.js`, which also looks for the
   hostnames/SSIDs recorded in the mirror when it is present); fixtures are
@@ -143,8 +170,10 @@ visible focus, reduced-motion respected.
   Invented locally administered MACs use the 02:00:5E:xx:xx:xx prefix
   (IANA OUI with the U/L bit set; e.g. the replay's synthetic BSSIDs);
   no other MACs pass.
-- Built-package verification (`verify_built_apk.py`) and reproducible
-  release manifests as in the previous project.
+- Built-package verification (`security-tests/verify_built_apk.js`, run by
+  `dev/build/sdk-build.sh` before anything reaches `dist/`) and a
+  reproducible release manifest (`dist/<release>/BUILDINFO`: commit, SDK
+  image digest, SDK tarball hash, entrypoint hash, feed commits).
 
 ## 7. Development workflow
 

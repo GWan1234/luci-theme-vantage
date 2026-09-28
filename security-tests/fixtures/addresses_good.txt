@@ -16,3 +16,5 @@ public resolver 9.9.9.9
 a longer hostname example-host-12345 is not the mirror one
 id deadbeefcafe without the keyword
 textbook link-local gateway fe80::1 and fe80::ab
+short mirror name inside a word zedonk, in another case ZED
+a longer SSID Example Home Network and Pat's-APs

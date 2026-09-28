@@ -4,6 +4,8 @@
  (no git describe noise such as "(HEAD detached at …) branch" or "~hash"),
  entity-encoded, and only shown to logged-in users: error pages reach
  anonymous visitors too. The menu script is only loaded for a session.
+ (The core header's L.env script still carries the LuCI build for
+ everyone; see docs/luci-contract.md section 2.)
 -#}
 {% if (blank_page): %}
 </div>

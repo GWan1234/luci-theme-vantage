@@ -3,7 +3,10 @@
  Data-free: host details and the menu are fetched by menu-vantage.js over
  rpc after login. Everything request-derived is entity-encoded; visitors who
  are not logged in (login redirect, 404, CSRF error) get the bare frame with
- no menu, no host details and a generic title.
+ no menu, no host details and a generic title from this template. LuCI's
+ core header.ut, which includes this one, then prints its own
+ L = new LuCI({...}) script (LuCI build, nodespec; on an anonymous 404 the
+ whole menu tree): upstream, see docs/luci-contract.md section 2.
 -#}
 {%
 	const authed = !!ctx.authsession;

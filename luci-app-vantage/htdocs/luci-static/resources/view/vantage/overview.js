@@ -29,17 +29,16 @@ var callInfo = rpc.declare({ object: 'system', method: 'info' });
 var callRead = rpc.declare({ object: 'file', method: 'read', params: [ 'path' ], expect: { data: '' } });
 var callIfDump = rpc.declare({ object: 'network.interface', method: 'dump', expect: { 'interface': [] } });
 var callDevs = rpc.declare({ object: 'network.device', method: 'status', expect: { '': {} } });
-var callWifi = rpc.declare({ object: 'luci-rpc', method: 'getWirelessDevices', expect: { '': {} } });
+/* luci.vantage is the app's own rpcd ucode plugin: network.wireless status
+   without keys or RADIUS secrets, and the validated alias write */
+var callWifi = rpc.declare({ object: 'luci.vantage', method: 'wireless', expect: { '': {} } });
 var callHints = rpc.declare({ object: 'luci-rpc', method: 'getHostHints', expect: { '': {} } });
 var callIwInfo = rpc.declare({ object: 'iwinfo', method: 'info', params: [ 'device' ], expect: { '': {} } });
 var callAssoc = rpc.declare({ object: 'iwinfo', method: 'assoclist', params: [ 'device' ], expect: { results: [] } });
 var callRrdns = rpc.declare({ object: 'network.rrdns', method: 'lookup', params: [ 'addrs', 'timeout', 'limit' ], expect: { '': {} } });
 var callMdns = rpc.declare({ object: 'umdns', method: 'hosts' });
 var callUciGet = rpc.declare({ object: 'uci', method: 'get', params: [ 'config' ], expect: { values: {} } });
-var callUciAdd = rpc.declare({ object: 'uci', method: 'add', params: [ 'config', 'type', 'values' ] });
-var callUciSet = rpc.declare({ object: 'uci', method: 'set', params: [ 'config', 'section', 'values' ] });
-var callUciDelete = rpc.declare({ object: 'uci', method: 'delete', params: [ 'config', 'section' ] });
-var callUciCommit = rpc.declare({ object: 'uci', method: 'commit', params: [ 'config' ] });
+var callSetAlias = rpc.declare({ object: 'luci.vantage', method: 'set_alias', params: [ 'mac', 'name', 'icon' ] });
 var callAccess = rpc.declare({ object: 'session', method: 'access', params: [ 'scope', 'object', 'function' ], expect: { access: false } });
 
 var hostapdCalls = {};
@@ -238,7 +237,7 @@ function hueOf(mac) {
 
 function avatar(c, small) {
 	var el = E('span', { 'class': 'vt-av' + (small ? ' vt-av-sm' : '') + (c.gone ? ' vt-av-gone' : '') }, [ icon(c.icon || 'device') ]);
-	el.style.setProperty('--vt-h', String(hueOf(c.mac)));
+	el.style.setProperty('--vt-h', hueOf(c.mac).toFixed(0));
 	return el;
 }
 
@@ -337,9 +336,11 @@ return view.extend({
 			L.resolveDefault(callAccess('access-group', 'luci-app-vantage-names', 'write'), false),
 			this.loadAliases(),
 			L.resolveDefault(callMdns(), null),
-			this.fetch()
+			this.fetch(),
+			/* reverse DNS is an optional grant: without it, skip it quietly */
+			L.resolveDefault(callAccess('access-group', 'luci-app-vantage-rdns', 'read'), false)
 		]).then(function(r) {
-			return { board: r[1] || {}, canWrite: r[2] === true, mdns: r[4], raw: r[5] };
+			return { board: r[1] || {}, canWrite: r[2] === true, mdns: r[4], raw: r[5], canRdns: r[6] === true };
 		});
 	},
 
@@ -347,7 +348,7 @@ return view.extend({
 		var self = this;
 		return L.resolveDefault(callUciGet('vantage'), {}).then(function(values) {
 			var list = (values && typeof values === 'object') ? Object.keys(values).map(function(k) { return values[k]; }) : [];
-			self.aliases = names.aliasMap(list);
+			self.aliases = names.aliasMap(list.slice(0, names.ALIAS_MAX + 1));
 			return self.aliases;
 		});
 	},
@@ -364,26 +365,25 @@ return view.extend({
 			L.resolveDefault(callHints(), {})
 		]).then(function(r) {
 			var wifiDevs = (r[4] && typeof r[4] === 'object') ? r[4] : {};
-			var ifnames = [], firstPerRadio = [];
+			var ifnames = [];
 			Object.keys(wifiDevs).forEach(function(rn) {
 				var ifs = (wifiDevs[rn] && Array.isArray(wifiDevs[rn].interfaces)) ? wifiDevs[rn].interfaces : [];
-				var first = null;
 				ifs.forEach(function(i) {
-					if (i && typeof i.ifname === 'string' && HOSTAPD_OBJ.test(i.ifname)) { ifnames.push(i.ifname); first = first || i.ifname; }
+					if (i && typeof i.ifname === 'string' && HOSTAPD_OBJ.test(i.ifname) && ifnames.indexOf(i.ifname) < 0) ifnames.push(i.ifname);
 				});
-				if (first) firstPerRadio.push(first);
 			});
+			/* iwinfo per interface: channel and power for the radio, BSSID
+			   and SSID for each network (luci.vantage wireless carries
+			   configuration only) */
 			var per = [];
 			ifnames.forEach(function(ifn) {
 				per.push(L.resolveDefault(callAssoc(ifn), []).then(function(v) { return [ 'assoc', ifn, v ]; }));
 				per.push(hostapd(ifn, 'get_clients').then(function(v) { return [ 'hapd', ifn, v ]; }));
 				per.push(hostapd(ifn, 'get_status').then(function(v) { return [ 'hapdStatus', ifn, v ]; }));
-			});
-			firstPerRadio.forEach(function(ifn) {
 				per.push(L.resolveDefault(callIwInfo(ifn), {}).then(function(v) { return [ 'iwinfo', ifn, v ]; }));
 			});
 			return Promise.all(per).then(function(parts) {
-				var assoc = {}, hapd = {}, hapdStatus = {}, iwinfo = {};
+				var assoc = Object.create(null), hapd = Object.create(null), hapdStatus = Object.create(null), iwinfo = Object.create(null);
 				parts.forEach(function(p) {
 					if (p[0] === 'assoc') assoc[p[1]] = p[2];
 					else if (p[0] === 'hapd') hapd[p[1]] = p[2];
@@ -400,7 +400,8 @@ return view.extend({
 
 	initState: function(data) {
 		var stored = readStore() || {}, now = Date.now();
-		var net = {};
+		/* keys come from sessionStorage: no prototype to overwrite */
+		var net = Object.create(null);
 		if (stored.net && typeof stored.net === 'object')
 			Object.keys(stored.net).forEach(function(k) {
 				if (/^[A-Za-z0-9_.:-]{1,40}$/.test(k)) net[k] = series.valid(stored.net[k], 3, HIST_MAX, now);
@@ -415,11 +416,11 @@ return view.extend({
 		this.canWrite = data.canWrite;
 		this.st = {
 			clock: null, stat: null, cpu: null,
-			devPrev: null, staPrev: null, devRates: {}, staRates: {}, radioRates: {}, ssidRates: {},
+			devPrev: null, staPrev: null, devRates: Object.create(null), staRates: Object.create(null), radioRates: Object.create(null), ssidRates: Object.create(null),
 			hist: { net: net, cpu: series.valid(stored.cpu, 2, HIST_MAX, now), mem: series.valid(stored.mem, 2, HIST_MAX, now) },
 			clientHist: clientHist, bestStd: Object.create(null),
-			presence: null, isNew: {}, gone: [],
-			rdns: Object.create(null), rdnsBusy: false, rdnsOff: false,
+			presence: null, isNew: Object.create(null), gone: [],
+			rdns: Object.create(null), rdnsBusy: false, rdnsOff: !data.canRdns,
 			mdns: Object.create(null), mdnsOff: true, mdnsAt: 0,
 			oui: null, ouiLoading: false,
 			lastOk: 0, lastErr: null, paused: false
@@ -463,7 +464,7 @@ return view.extend({
 		if (m.device.memory) series.push(st.hist.mem, [ at, m.device.memory.usedPct ], WINDOW_MS, HIST_MAX);
 
 		/* interface counters */
-		var devCounters = {};
+		var devCounters = Object.create(null);
 		Object.keys(raw.devs || {}).forEach(function(n) {
 			var s = raw.devs[n] && raw.devs[n].statistics;
 			if (s) devCounters[n] = { rx: s.rx_bytes, tx: s.tx_bytes };
@@ -477,9 +478,9 @@ return view.extend({
 			list.forEach(function(n) { var r = st.devRates[n]; if (r) { rx += r.rx; tx += r.tx; ok = true; } });
 			return ok ? { rx: rx, tx: tx } : null;
 		}
-		st.radioRates = {};
+		st.radioRates = Object.create(null);
 		m.radios.forEach(function(r) { var v = sum(r.ifnames); if (v) st.radioRates[r.id] = v; });
-		st.ssidRates = {};
+		st.ssidRates = Object.create(null);
 		m.ssids.forEach(function(s) { var v = s.ifname ? sum([ s.ifname ]) : null; if (v) st.ssidRates[s.id] = v; });
 		var upRate = m.uplink ? st.devRates[m.uplink.statsDev] : null;
 		st.uplinkRate = upRate || null;
@@ -489,7 +490,7 @@ return view.extend({
 		m.radios.forEach(function(r) { if (st.radioRates[r.id]) self.pushNet(r.id, at, st.radioRates[r.id]); });
 
 		/* station counters, per-station history */
-		var staCounters = {};
+		var staCounters = Object.create(null);
 		m.clients.forEach(function(c) { staCounters[c.mac] = { rx: c.rxBytes, tx: c.txBytes }; });
 		var sr = model.rates(st.staPrev, staCounters, at);
 		st.staPrev = sr.next;
@@ -1614,12 +1615,23 @@ return view.extend({
 		if (this.lastFocus && this.lastFocus.isConnected) this.lastFocus.focus();
 	},
 
+	/* A deep link names an existing thing or nothing: a client by a
+	   station MAC, a radio this device reports; uplink and device take no
+	   id. Anything else is dropped from the address bar, so a crafted link
+	   cannot put its own text in the drawer title. */
 	openFromHash: function() {
-		var m = /^#(client|radio|uplink|device)=(.+)$/.exec(location.hash || '');
-		if (!m) return;
-		var id = decodeURIComponent(m[2]);
-		if (m[1] === 'client') id = names.normMac(id) || id;
-		this.openDrawer(m[1], id);
+		var hash = location.hash || '', m = /^#(client|radio|uplink|device)=(.{1,128})$/.exec(hash), id = null;
+		if (m) {
+			try { id = decodeURIComponent(m[2]); } catch (e) { id = null; }
+			if (id == null) { /* malformed escape */ }
+			else if (m[1] === 'client') id = names.normMac(id);
+			else if (m[1] === 'radio') id = this.m && this.m.radios.some(function(r) { return r.id === id; }) ? id : null;
+			else id = m[1];
+		}
+		if (id != null) { this.openDrawer(m[1], id); return; }
+		if (/^#(client|radio|uplink|device)=/.test(hash)) {
+			try { history.replaceState(null, '', location.pathname + location.search); } catch (e) {}
+		}
 	},
 
 	paintDrawer: function() {
@@ -1645,7 +1657,7 @@ return view.extend({
 		if (!c) st.gone.forEach(function(g) { if (g.client.mac === mac) gone = g; });
 		if (!c && gone) c = Object.assign({}, gone.client, { gone: true, goneAt: gone.at });
 		if (!c) return {
-			title: [ E('span', { 'class': 'vt-drawer-name' }, [ fmt.mac(mac) ]) ],
+			title: [ E('span', { 'class': 'vt-drawer-name' }, [ names.normMac(mac) ? fmt.mac(mac) : _('Unknown device') ]) ],
 			body: [ E('div', { 'class': 'vt-empty' }, [ icon('wifi'), E('p', { 'class': 'vt-empty-title' }, [ _('Not connected') ]), E('p', {}, [ _('This station is not associated right now.') ]) ]) ]
 		};
 
@@ -1805,29 +1817,43 @@ return view.extend({
 		input.focus();
 	},
 
-	/* -> Promise<true | false | string (validation error)> */
+	/* Checked here for a quick answer, then sent to luci.vantage
+	   set_alias, which checks again, keeps one section per MAC and writes
+	   /etc/config/vantage directly (no staged uci changes, so LuCI's
+	   apply/rollback lock does not block it). The names are reloaded after
+	   every attempt, failed or not, so the next one starts from what the
+	   device holds.
+	   -> Promise<true | false | string (error text)> */
 	saveAlias: function(mac, name, iconName) {
 		var self = this, key = names.normMac(mac);
 		var op = names.aliasOp(key ? this.aliases[key] || null : null, mac, name, iconName);
-		function ok(r) { return !(typeof r === 'number' && r !== 0); }
 		if (!op.ok) return Promise.resolve(op.error);
-		var step;
-		if (op.op === 'none') return Promise.resolve(true);
-		if (op.op === 'delete') step = callUciDelete('vantage', op.sid);
-		else if (op.op === 'set') step = callUciSet('vantage', op.sid, op.values);
-		else step = callUciAdd('vantage', 'client', op.values);
-		return Promise.resolve(step).then(function(r) {
-			if (!ok(r)) return false;
-			return callUciCommit('vantage').then(function(c) {
-				if (!ok(c)) return false;
-				return self.loadAliases().then(function() { return true; });
-			});
-		}).catch(function() { return false; });
+		var value = op.op === 'add' || op.op === 'set' ? op.values.name : '';
+		var icon = value ? (names.validIcon(iconName) || '') : '';
+		return Promise.resolve(callSetAlias(key, value, icon)).then(function(r) {
+			return (r && typeof r === 'object' && r.ok === true) ? true : self.aliasError(r);
+		}, function() { return false; }).then(function(res) {
+			return self.loadAliases().then(function() { return res; }, function() { return res; });
+		});
+	},
+
+	/* set_alias refusal -> message; false for anything else (no grant, no
+	   plugin, transport error) */
+	aliasError: function(r) {
+		switch (r && typeof r === 'object' ? r.error : null) {
+		case 'invalid-mac': return _('Not a station MAC address');
+		case 'invalid-name': return _('Name contains invisible or control characters');
+		case 'name-too-long': return _('Name is longer than %d characters').format(names.NAME_MAX);
+		case 'invalid-icon': return _('Unknown device type');
+		case 'too-many': return _('This device already stores %d names; remove some first.').format(names.ALIAS_MAX);
+		case 'failed': return _('The device could not write /etc/config/vantage.');
+		}
+		return false;
 	},
 
 	drawerRadio: function(id) {
 		var self = this, r = this.m.radios.filter(function(x) { return x.id === id; })[0];
-		if (!r) return { title: [ E('span', { 'class': 'vt-drawer-name' }, [ id ]) ], body: [ E('p', { 'class': 'vt-empty-inline' }, [ _('This radio is not reported any more.') ]) ] };
+		if (!r) return { title: [ E('span', { 'class': 'vt-drawer-name' }, [ _('Unknown radio') ]) ], body: [ E('p', { 'class': 'vt-empty-inline' }, [ _('This radio is not reported any more.') ]) ] };
 		var rr = this.st.radioRates[r.id], ins = this.st.radioInsights[r.id] || { notes: [] };
 		var clients = this.m.clients.filter(function(c) { return c.radio === r.id; });
 		return {

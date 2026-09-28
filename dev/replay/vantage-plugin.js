@@ -1,0 +1,217 @@
+'use strict';
+/* Replay stand-in for luci-app-vantage's rpcd ucode plugin
+   (luci-app-vantage/root/usr/share/rpcd/ucode/luci.vantage), which the
+   replay cannot run: there is no rpcd here.
+
+   Same object, methods, argument typing and replies:
+     luci.vantage wireless   network.wireless status (from the recording),
+                             reduced to the fields the dashboard reads
+     luci.vantage set_alias  { mac, name, icon } -> uci vantage in the
+                             store's overlay, committed at once
+   tests/plugin.test.js checks this file, the real plugin (when a host
+   ucode binary is available) and names.js against the same cases, so the
+   three stay in step.
+
+   store.js loads every dev/replay/*-plugin.js and routes calls on OBJECT
+   to call(store, method, args); POLICY feeds `ubus list`.
+*/
+
+const OBJECT = 'luci.vantage';
+const CONFIG = 'vantage';
+const NAME_MAX = 48;
+const NAME_MAX_UNITS = NAME_MAX * 8;
+const MAX_ALIASES = 512;
+const ICONS = [ 'phone', 'laptop', 'tablet', 'desktop', 'tv', 'speaker', 'printer', 'camera', 'console', 'watch', 'iot', 'router', 'device' ];
+
+/* rpcd ubus status codes */
+const INVALID_ARGUMENT = 2;
+const METHOD_NOT_FOUND = 3;
+
+/* argument policy of each method (rpcd rejects unknown names and wrong types) */
+const POLICY = {
+	wireless: {},
+	set_alias: { mac: 'string', name: 'string', icon: 'string' }
+};
+
+function normMac(v) {
+	if (typeof v !== 'string') return null;
+	let h = v.replace(/^[ \t\r\n]+|[ \t\r\n]+$/g, '').toLowerCase();
+	if (/^[0-9a-f]{2}(:[0-9a-f]{2}){5}$/.test(h)) return h;
+	if (/^[0-9a-f]{2}(-[0-9a-f]{2}){5}$/.test(h)) return h.replace(/-/g, ':');
+	if (/^[0-9a-f]{4}\.[0-9a-f]{4}\.[0-9a-f]{4}$/.test(h) || /^[0-9a-f]{12}$/.test(h)) {
+		h = h.replace(/\./g, '');
+		return h.match(/../g).join(':');
+	}
+	return null;
+}
+
+function isMulticast(mac) { return (parseInt(mac.slice(0, 2), 16) & 1) === 1; }
+
+function forbidden(cp) {
+	return cp <= 0x1f || (cp >= 0x7f && cp <= 0x9f) ||
+		cp === 0xad || cp === 0x34f || cp === 0x61c || cp === 0x115f || cp === 0x1160 ||
+		cp === 0x17b4 || cp === 0x17b5 || cp === 0x180e || cp === 0x200b || cp === 0x200e || cp === 0x200f ||
+		(cp >= 0x2028 && cp <= 0x202e) || (cp >= 0x2060 && cp <= 0x206f) || cp === 0x3164 ||
+		(cp >= 0xfe00 && cp <= 0xfe0d) || cp === 0xfeff || cp === 0xffa0 || (cp >= 0xfff9 && cp <= 0xfffb) ||
+		(cp >= 0xe0000 && cp <= 0xe007f) ||
+		(cp >= 0xd800 && cp <= 0xdfff);   /* a lone surrogate (not UTF-8 encodable) */
+}
+
+function isSpace(cp) {
+	return cp === 0x20 || cp === 0xa0 || cp === 0x1680 || (cp >= 0x2000 && cp <= 0x200a) ||
+		cp === 0x202f || cp === 0x205f || cp === 0x3000;
+}
+
+/* -> { ok: true, value } | { ok: false, error } */
+function validateName(name) {
+	if (name == null) name = '';
+	if (typeof name !== 'string') return { ok: false, error: 'invalid-name' };
+	const cps = Array.from(name);
+	if (name.length > NAME_MAX_UNITS) return { ok: false, error: 'name-too-long' };
+	if (cps.some(c => forbidden(c.codePointAt(0)))) return { ok: false, error: 'invalid-name' };
+	let out = '', count = 0, pending = false;
+	for (const c of cps) {
+		if (isSpace(c.codePointAt(0))) { pending = true; continue; }
+		if (pending && count) { out += ' '; count++; }
+		pending = false;
+		out += c;
+		count++;
+	}
+	if (count > NAME_MAX) return { ok: false, error: 'name-too-long' };
+	return { ok: true, value: out };
+}
+
+function scalar(v) { return [ 'string', 'number', 'boolean' ].includes(typeof v) ? v : null; }
+function shortString(v, max) { return (typeof v === 'string' && Buffer.byteLength(v) <= max) ? v : null; }
+function obj(v) { return (v && typeof v === 'object' && !Array.isArray(v)) ? v : {}; }
+
+/* the encryption mode's leading run of mode characters, nothing after it */
+function encryption(v) { const m = typeof v === 'string' ? /^[A-Za-z0-9+_-]{1,40}/.exec(v) : null; return m ? m[0] : null; }
+
+function reduceIface(i) {
+	const c = obj(i.config);
+	const networks = (Array.isArray(c.network) ? c.network : [ c.network ]).filter(n => typeof n === 'string' && Buffer.byteLength(n) <= 64);
+	return {
+		ifname: shortString(i.ifname, 64),
+		section: shortString(i.section, 64),
+		config: {
+			ssid: shortString(c.ssid, 128),
+			mode: shortString(c.mode, 32),
+			hidden: scalar(c.hidden),
+			encryption: encryption(c.encryption),
+			ieee80211w: scalar(c.ieee80211w),
+			ieee80211r: scalar(c.ieee80211r),
+			ieee80211k: scalar(c.ieee80211k),
+			ieee80211v: scalar(c.ieee80211v),
+			network: networks,
+			macaddr: normMac(c.macaddr)
+		}
+	};
+}
+
+function reduceRadio(r) {
+	const c = obj(r.config);
+	return {
+		up: r.up === true,
+		pending: r.pending === true,
+		disabled: r.disabled === true,
+		config: {
+			band: shortString(c.band, 16),
+			channel: scalar(c.channel),
+			htmode: shortString(c.htmode, 16),
+			country: shortString(c.country, 8),
+			txpower: scalar(c.txpower),
+			disabled: scalar(c.disabled)
+		},
+		interfaces: (Array.isArray(r.interfaces) ? r.interfaces : []).filter(i => i && typeof i === 'object' && !Array.isArray(i)).map(reduceIface)
+	};
+}
+
+/* network.wireless status -> reply of luci.vantage wireless */
+function reduceWireless(status) {
+	const out = {};
+	for (const [ name, r ] of Object.entries(obj(status)))
+		if (r && typeof r === 'object' && !Array.isArray(r) && /^[A-Za-z0-9_.-]{1,64}$/.test(name)) out[name] = reduceRadio(r);
+	return out;
+}
+
+/* The uci work of set_alias against a minimal cursor:
+     { sections(): [ { '.name', '.type', ... } ], add(type) -> sid,
+       set(sid, opt, value), del(sid, opt?), commit() -> bool } */
+function setAlias(uci, args) {
+	const mac = normMac(args.mac);
+	if (!mac || isMulticast(mac)) return { ok: false, error: 'invalid-mac' };
+	const v = validateName(args.name);
+	if (!v.ok) return v;
+	const icon = args.icon ?? '';
+	if (icon !== '' && !ICONS.includes(icon)) return { ok: false, error: 'invalid-icon' };
+
+	const clients = uci.sections().filter(s => s['.type'] === 'client');
+	const mine = clients.filter(s => normMac(s.mac) === mac).map(s => s['.name']);
+	let op;
+	if (v.value === '') {
+		if (!mine.length) return { ok: true, op: 'none', mac };
+		mine.forEach(sid => uci.del(sid));
+		op = 'delete';
+	}
+	else if (mine.length) {
+		uci.set(mine[0], 'mac', mac);
+		uci.set(mine[0], 'name', v.value);
+		if (icon !== '') uci.set(mine[0], 'icon', icon);
+		else uci.del(mine[0], 'icon');
+		mine.slice(1).forEach(sid => uci.del(sid));
+		op = 'set';
+	}
+	else {
+		if (clients.length >= MAX_ALIASES) return { ok: false, error: 'too-many' };
+		const sid = uci.add('client');
+		if (!sid) return { ok: false, error: 'failed' };
+		uci.set(sid, 'mac', mac);
+		uci.set(sid, 'name', v.value);
+		if (icon !== '') uci.set(sid, 'icon', icon);
+		op = 'add';
+	}
+	if (!uci.commit()) return { ok: false, error: 'failed' };
+	return { ok: true, op, mac };
+}
+
+/* rpcd's argument check: every argument must be in the policy with the
+   declared type (absent ones are fine) */
+function argsOk(method, args) {
+	const pol = POLICY[method];
+	for (const [ k, v ] of Object.entries(args || {})) {
+		if (k === 'ubus_rpc_session') continue;
+		if (!Object.prototype.hasOwnProperty.call(pol, k)) return false;
+		const t = Array.isArray(v) ? 'array' : v === null ? 'null' : typeof v;
+		if (t !== pol[k]) return false;
+	}
+	return true;
+}
+
+/* a uci cursor on the replay store's overlay for one config */
+function storeCursor(store) {
+	const u = (method, a) => store.uci(method, Object.assign({ config: CONFIG }, a));
+	const ok = r => r && Array.isArray(r.result) && r.result[0] === 0;
+	return {
+		sections: () => {
+			const r = u('get', {});
+			return ok(r) ? Object.values(r.result[1].values || {}) : [];
+		},
+		add: type => { const r = u('add', { type }); return ok(r) ? r.result[1].section : null; },
+		set: (sid, opt, value) => u('set', { section: sid, values: { [opt]: value } }),
+		del: (sid, opt) => u('delete', opt == null ? { section: sid } : { section: sid, option: opt }),
+		commit: () => ok(u('commit', {}))
+	};
+}
+
+/* JSON-RPC reply body for one call on luci.vantage */
+function call(store, method, args) {
+	args = (args && typeof args === 'object') ? args : {};
+	if (!Object.prototype.hasOwnProperty.call(POLICY, method)) return { result: [ METHOD_NOT_FOUND ] };
+	if (!argsOk(method, args)) return { result: [ INVALID_ARGUMENT ] };
+	if (method === 'wireless') return { result: [ 0, reduceWireless(store.data('network.wireless', 'status', {})) ] };
+	if (store.uciSeed) store.uciSeed(CONFIG, { main: { '.anonymous': false, '.type': 'vantage', '.name': 'main' } });
+	return { result: [ 0, setAlias(storeCursor(store), args) ] };
+}
+
+module.exports = { OBJECT, POLICY, MAX_ALIASES, NAME_MAX, ICONS, normMac, validateName, reduceWireless, setAlias, argsOk, call };

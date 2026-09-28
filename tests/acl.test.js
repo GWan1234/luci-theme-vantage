@@ -28,25 +28,39 @@ test('view: no HTML sinks and no save/apply buttons', () => {
 	for (const k of [ 'handleSave', 'handleSaveApply', 'handleReset' ]) assert.match(view, new RegExp(k + ': null'));
 });
 
-test('view: aliases are written only through names.aliasOp', () => {
+test('view: aliases are checked by names.aliasOp and written only through luci.vantage set_alias', () => {
 	assert.match(view, /names\.aliasOp\(/);
-	for (const m of view.matchAll(/callUci(Add|Set|Delete)\(([^)]*)\)/g))
-		assert.match(m[2], /^'vantage', (op\.sid|'client')(, op\.values)?$/, m[0]);
+	assert.doesNotMatch(view, /object: 'uci', method: '(add|set|delete|commit|rename|order|apply|revert)'/, 'no uci write declare');
+	assert.doesNotMatch(view, /callUci(Add|Set|Delete|Commit)\b/);
+	const calls = [ ...view.matchAll(/callSetAlias\(([^)]*)\)/g) ].map(m => m[1]);
+	assert.deepEqual(calls, [ 'key, value, icon' ]);
+	/* the aliases are reloaded after every attempt, failed or not */
+	assert.match(view, /callSetAlias\(key, value, icon\)\)\.then\([\s\S]*?\}\)\.then\(function\(res\) \{\n\t\t\treturn self\.loadAliases\(\)/);
+});
+
+test('view: wireless data comes from luci.vantage wireless, reverse DNS only with its group', () => {
+	assert.match(view, /rpc\.declare\(\{ object: 'luci\.vantage', method: 'wireless'/);
+	assert.doesNotMatch(view, /getWirelessDevices/);
+	assert.match(view, /rdnsOff: !data\.canRdns/);
 });
 
 test('Makefile: feed-buildable LuCI app, config is a conffile', () => {
 	assert.match(makefile, /^include \$\(TOPDIR\)\/rules\.mk$/m);
 	assert.match(makefile, /^include \$\(TOPDIR\)\/feeds\/luci\/luci\.mk$/m);
 	assert.match(makefile, /^# call BuildPackage - OpenWrt buildroot signature$/m);
-	assert.match(makefile, /^PKG_VERSION:=1\.0\.0$/m);
+	assert.match(makefile, /^PKG_VERSION:=1\.0\.1$/m);
 	assert.match(makefile, /^PKG_RELEASE:=1$/m);
-	assert.match(makefile, /^PKG_LICENSE:=Apache-2\.0$/m);
+	assert.match(makefile, /^PKG_LICENSE:=GPL-3\.0-or-later$/m);
 	assert.match(makefile, /^LUCI_TITLE:=Vantage dashboard$/m);
 	assert.match(makefile, /^LUCI_DEPENDS:=\+luci-base \+rpcd( |$)/m);
+	assert.match(makefile, /^LUCI_DEPENDS:=.* \+rpcd-mod-ucode( |$)/m, 'the plugin needs rpcd-mod-ucode');
 	assert.doesNotMatch(makefile, /rrdns[^\n]*DEPENDS|DEPENDS[^\n]*rrdns|DEPENDS[^\n]*umdns/, 'reverse DNS and mDNS stay optional');
 	assert.match(makefile, /^LUCI_MINIFY_CSS:=0$/m);
 	assert.match(makefile, /define Package\/luci-app-vantage\/conffiles\n\/etc\/config\/vantage\nendef/);
 	assert.ok(!fs.existsSync(path.join(APP, 'luasrc')), 'no Lua (would pull luci-lua-runtime)');
+	/* rpcd ignores a world-writable plugin; luci.mk copies modes as they are */
+	const mode = fs.statSync(path.join(APP, 'root/usr/share/rpcd/ucode/luci.vantage')).mode;
+	assert.equal(mode & 0o002, 0, 'plugin is not world-writable');
 });
 
 test('default config: one named main section, no client entries', () => {
