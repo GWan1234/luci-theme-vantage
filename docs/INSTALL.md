@@ -16,7 +16,7 @@ in the current directory on your computer:
 ```sh
 sha256sum -c SHA256SUMS
 scp -O luci-theme-vantage-*.apk luci-app-vantage-*.apk root@192.0.2.1:/tmp/
-ssh root@192.0.2.1 'apk add --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
+ssh root@192.0.2.1 'apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
 ssh root@192.0.2.1 'rm -f /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
 ```
 
@@ -125,17 +125,21 @@ SDK container image.
 
 You need:
 
-- Linux with **podman** (rootless is fine; the script runs the container
-  with `--userns=keep-id`), `git` and `bash`. The script calls `podman`
+- Linux with **podman 4.3 or later** (rootless is fine; the script maps
+  your user to the image's build user with
+  `--userns=keep-id:uid=1000,gid=1000`, so any host UID works), `git`,
+  `bash` and **Node.js** (the built packages are verified with
+  `security-tests/verify_built_apk.js`). The script calls `podman`
   directly and does not use Docker.
-- About **4 GB of disk** for the SDK image
-  (`ghcr.io/openwrt/sdk:x86_64-25.12.4`, 3.6 GB) plus a few hundred MB while
-  building. The container is removed afterwards; the image stays.
+- About **5 GB of disk** for the SDK image
+  (`ghcr.io/openwrt/sdk:x86_64-25.12.4`, pulled by digest) plus a few
+  hundred MB while building. The container is removed afterwards; the image
+  stays.
 - **Network access**: the first run pulls the image, and every build clones
-  OpenWrt's package feeds inside the container at the revisions the SDK
-  pins.
+  OpenWrt's package feeds (over HTTPS, at the commits pinned in the SDK
+  image) inside the container.
 - **Time**: pulling the image takes longest. The build itself takes a few
-  minutes (about two on a current desktop).
+  minutes.
 
 ```sh
 git clone https://github.com/anothaDev/luci-theme-vantage.git
@@ -144,24 +148,144 @@ dev/build/sdk-build.sh              # SDK 25.12.4, current commit (HEAD)
 dev/build/sdk-build.sh 25.12.4 <tag-or-commit>
 ```
 
-The first argument is the SDK release (`25.12.*`, `24.10.*` or `23.05.*`),
-the second any git revision. The packages and their `SHA256SUMS` land in
-`dist/<release>/`. The script builds from a fresh clone of that commit, not
-from your working tree, so uncommitted changes are not included. It keeps
-its work directory (`vantage-build.XXXXXX` under `$TMPDIR`, or `/tmp`) with
-the full `build.log`. Delete that directory once you no longer need the
-log.
+The first argument is the SDK release, the second any git revision. The
+script builds from a fresh clone of that commit, not from your working
+tree, so uncommitted changes are not included.
+
+What goes into a build is pinned:
+
+- **SDK image by digest.** The script keeps a table of SDK releases and
+  image digests and refuses a release that is not in it. The image already
+  contains the extracted SDK; the script checks that it is the SDK tarball
+  whose SHA-256 is recorded in the table (and in OpenWrt's signed
+  `sha256sums` for that release) and skips the image's `setup.sh`, which
+  would download the SDK again.
+- **Package feeds by commit.** The SDK image's `feeds.conf.default` names a
+  commit for every feed; the build clones those commits over HTTPS. The feed
+  pins come from the pinned image.
+- **Build entrypoint by hash** (`dev/build/entrypoint.sh`, from
+  `openwrt/gh-action-sdk`).
+
+The container runs without capabilities (`--cap-drop=all`,
+`no-new-privileges`), sees the commit's clone read-only and can write only
+to a fresh output directory. It keeps network access, which the feed clone
+needs.
+
+Before anything is written to `dist/<release>/`, the script checks both
+packages with `security-tests/verify_built_apk.js`, using the SDK's own
+`apk` and `jsmin`: the file list, modes and owners, metadata and
+dependencies, install and remove scripts, and that every packaged file is
+the commit's source after LuCI's build transforms (JavaScript minification,
+`?v=<version>` in templates). Then it replaces the previous contents of
+`dist/<release>/` (only its own file names) with:
+
+| File | Contents |
+|---|---|
+| `luci-theme-vantage-<version>.apk`, `luci-app-vantage-<version>.apk` | the packages |
+| `SHA256SUMS` | their SHA-256 hashes |
+| `BUILDINFO` | commit, SDK release, image digest, SDK tarball hash, entrypoint hash, feed commits |
+| `packages.adb` | only with signing, see [Signed packages](#signed-packages) |
+
+The script exits 0 only when both packages were built, verified and
+hashed. After a successful build it deletes its work directory; after a
+failure it keeps it (`vantage-build.XXXXXX` under `$TMPDIR`, or `/tmp`) and
+prints its path, with the full `build.log`. Delete it once you no longer
+need the log. It also leaves the SDK's `apk` and `jsmin` in `dist/.tools/`
+so the packages can be re-checked later:
+
+```sh
+node security-tests/verify_built_apk.js dist/25.12.4
+```
+
+**Other SDK releases.** Only 25.12.4 is pinned. For another release, add
+its digest and SDK tarball line to the table in `sdk-build.sh` (the comment
+above the table shows how to get and cross-check both), or pass them for
+one build:
+
+```sh
+VANTAGE_SDK_IMAGE=ghcr.io/openwrt/sdk@sha256:<digest> \
+VANTAGE_SDK_SUM='<sha256> *openwrt-sdk-<release>-x86-64_<...>.tar.zst' \
+dev/build/sdk-build.sh <release>
+```
+
+`VANTAGE_SDK_IMAGE` must be a digest reference; a tag is refused.
 
 #### Verify a release by rebuilding it
 
-A given commit and SDK release always produce byte-identical packages. To
-confirm that a release's files were built from the source they claim, build
-the release tag with the SDK release it was built with, then compare:
+The same commit, SDK release and pinned SDK image produce byte-identical
+packages. To confirm that a release's files were built from the source they
+claim, build the release tag with the SDK release it was built with (its
+`BUILDINFO` says which), then compare:
 
 ```sh
 dev/build/sdk-build.sh 25.12.4 <tag>
 diff dist/25.12.4/SHA256SUMS /path/to/downloaded/SHA256SUMS && echo identical
+diff dist/25.12.4/BUILDINFO /path/to/downloaded/BUILDINFO && echo same inputs
 ```
+
+`BUILDINFO` differs only when the builds used different inputs, for
+example another SDK image digest.
+
+To check downloaded packages against a tag's source without rebuilding
+(after one build, so that `dist/.tools/` has the SDK's `apk`):
+
+```sh
+node security-tests/verify_built_apk.js --rev <tag> /path/to/downloads
+```
+
+#### Signed packages
+
+By default the packages are unsigned, and installing them needs
+`--allow-untrusted` plus your own hash check. A maintainer who publishes
+packages can instead sign a package index. The `.apk` files themselves stay
+unsigned and byte-identical (OpenWrt signs indexes, not single packages),
+so rebuilding and comparing still works.
+
+Maintainer, once: create an EC key pair **outside the repository** (the
+script refuses a key inside it, and `.gitignore` ignores `*.pem` and
+`key-build*`), keep the private key secret, and publish the public key and
+its SHA-256 somewhere other than the release page:
+
+```sh
+( umask 077 && mkdir -p ~/.config/vantage-signing &&
+  openssl ecparam -name prime256v1 -genkey -noout -out ~/.config/vantage-signing/vantage.key.pem )
+openssl ec -in ~/.config/vantage-signing/vantage.key.pem -pubout -out vantage-signing.pub.pem
+sha256sum vantage-signing.pub.pem
+```
+
+Build with the key; the script passes it to the SDK on standard input
+(never on the command line or in a mount), and `dist/<release>/` then also
+holds `packages.adb`, the index signed with that key. `BUILDINFO` records
+the public key's SHA-256.
+
+```sh
+VANTAGE_SIGN_KEY=~/.config/vantage-signing/vantage.key.pem dev/build/sdk-build.sh 25.12.4 <tag>
+```
+
+For 23.05/24.10 (opkg) use a usign key (`usign -G -s key-build -p
+key-build.pub`); the index is then `Packages` with `Packages.sig`. That
+path is untested.
+
+On the router, once: install the public key after checking its SHA-256
+against the published value:
+
+```sh
+sha256sum /tmp/vantage-signing.pub.pem
+cp /tmp/vantage-signing.pub.pem /etc/apk/keys/vantage-signing.pem
+```
+
+Then, with the two packages and `packages.adb` copied to one directory
+(for example `/tmp/vantage/`), install without `--allow-untrusted`:
+
+```sh
+apk add --no-network --repository /tmp/vantage/packages.adb luci-theme-vantage luci-app-vantage
+```
+
+apk checks the index signature against `/etc/apk/keys` and each package
+against the hash in the index, and ignores an index it cannot verify.
+Remove the key with `rm /etc/apk/keys/vantage-signing.pem` when you no
+longer want to trust it. The hash-checked `--allow-untrusted` route below
+keeps working for unsigned builds.
 
 ## Install on the router
 
@@ -217,19 +341,19 @@ Continue only when every file says `OK`.
 Both packages:
 
 ```sh
-apk add --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk
+apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk
 ```
 
 Theme only:
 
 ```sh
-apk add --allow-untrusted /tmp/luci-theme-vantage-*.apk
+apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk
 ```
 
 Dashboard only (works under Bootstrap or any other theme):
 
 ```sh
-apk add --allow-untrusted /tmp/luci-app-vantage-*.apk
+apk add --no-network --allow-untrusted /tmp/luci-app-vantage-*.apk
 ```
 
 **Why `--allow-untrusted`?** On OpenWrt 25.12, apk only installs packages
@@ -240,10 +364,18 @@ signature checking for that command, which means:
 
 - The hash check in step 2 is the only thing that tells you the files are
   the ones you meant to install. Do not skip it.
-- The flag covers everything that command installs. If `luci-base`, `rpcd`
-  or `rpcd-mod-iwinfo` is missing (unusual), install those first with a
-  normal, signature-checked `apk update && apk add rpcd-mod-iwinfo`, then
-  run the `--allow-untrusted` command with only the two Vantage files.
+- The flag covers everything that command installs, including anything
+  apk would fetch from your package feeds in the same run. `--no-network`
+  prevents that: apk installs only the named files and fails instead of
+  downloading a missing dependency without a signature check. If it
+  reports a missing dependency such as `luci-base`, `rpcd` or
+  `rpcd-mod-iwinfo` (unusual on a standard image), install it with a
+  normal, signature-checked `apk update && apk add <package>`, then repeat
+  the `--no-network` command.
+- The globs match every version in `/tmp`. Keep only one version of each
+  package there, or name the files exactly.
+- A maintainer who publishes a signed index lets you skip
+  `--allow-untrusted` altogether; see [Signed packages](#signed-packages).
 
 Check the result:
 
@@ -305,7 +437,7 @@ Reload the page afterwards. No service needs a restart.
 Get the newer files, check their hashes as above, copy them to `/tmp`, then:
 
 ```sh
-apk add --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk
+apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk
 ```
 
 apk replaces the installed version. Your theme choice is kept (the
@@ -478,7 +610,12 @@ uci commit luci
   see the Dashboard only when their `read` list includes `luci-app-vantage`
   (or `*`). To let them name devices, add `luci-app-vantage-names` to their
   `write` list. Without that, the dashboard works but offers no rename
-  button.
+  button. Names from reverse DNS need `luci-app-vantage-rdns` in the `read`
+  list as well (see [Security notes](#security-notes) before you add it).
+- The dashboard's radios and SSIDs come from the app's rpcd plugin
+  (`/usr/share/rpcd/ucode/luci.vantage`). If they are missing, check that
+  `ubus list luci.vantage` shows the object; `/etc/init.d/rpcd reload`
+  loads a newly installed plugin.
 
 ### Realtime Graphs are empty
 
@@ -498,13 +635,16 @@ and work either way.
 
 An access point that isn't the network's DHCP server knows little about its
 clients. The dashboard tries, in order: your own name for the device, reverse
-DNS, mDNS, DHCP host names (on the router that hands out addresses), the name
+DNS, DHCP host names (on the router that hands out addresses), mDNS, the name
 the device sends during WPS, the vendor from the MAC address, and finally
 "Private device" for phones and laptops that use a randomised MAC address.
-The source of each name is shown next to it.
+The source of each name is shown next to it. Any host on the network can
+send mDNS announcements, so an mDNS name is only used when nothing better is
+known and nobody contradicts it.
 
 - Reverse DNS needs `rpcd-mod-rrdns` and a DNS server that knows your
   clients. An OpenWrt router's dnsmasq answers for its DHCP leases.
+  Users other than `root` also need the `luci-app-vantage-rdns` group.
 - mDNS names need `umdns` (`apk add umdns`); names appear as devices
   announce themselves.
 - Or name a device yourself: open it on the dashboard and choose **Name this
@@ -536,22 +676,35 @@ Then reload the page. To remove Vantage entirely, see
 ## Security notes
 
 - **What the dashboard may do.** Its rpcd permissions (ACL) are read-only:
-  system, network, radio and station status, host hints, reverse DNS,
-  mDNS and `/proc/stat`. It cannot run commands. Its only write permission,
-  in a separate group (`luci-app-vantage-names`), is to its own
-  `/etc/config/vantage`. Details in the README's
-  [Security](../README.md#security) section.
-- **Wi-Fi keys.** The dashboard's read group (`luci-app-vantage`) includes
-  `luci-rpc getWirelessDevices`, which returns the wireless configuration,
-  including Wi-Fi passwords. LuCI's own Status and Wireless pages use the
-  same call. If you give a restricted LuCI user the dashboard, that user can
-  read the Wi-Fi keys.
-- **The theme** shows logged-out visitors (the login page, error pages)
-  nothing about the device, and loads nothing from the internet.
+  system, network, radio and station status, host hints, mDNS and
+  `/proc/stat`. It cannot run commands. Its only write permission, in a
+  separate group (`luci-app-vantage-names`), is the plugin method
+  `luci.vantage set_alias`, which checks each name on the device and
+  writes nothing but `/etc/config/vantage` (at most 512 names). Details
+  in the README's [Security](../README.md#security) section.
+- **Wi-Fi keys.** The dashboard reads the wireless configuration through
+  its own plugin method (`luci.vantage wireless`), which returns SSIDs,
+  channels and the encryption mode but no Wi-Fi passwords, SAE passwords or
+  RADIUS secrets. A restricted LuCI user who only has the dashboard cannot
+  read the keys. (LuCI's own Status and Wireless pages grant more; check
+  what else such a user has.)
+- **Reverse DNS is a separate group.** `luci-app-vantage-rdns` grants
+  `network.rrdns lookup`, whose caller may name the DNS server and port.
+  A user who holds it can make the device send DNS queries to any host it
+  can reach. Give it only to users you would trust with that; without it
+  the dashboard simply shows no reverse-DNS names.
+- **The theme** adds nothing about the device to what logged-out visitors
+  see (the login page, error pages), and loads nothing from the internet.
+  LuCI itself still puts its `L.env` script on those pages: the LuCI
+  build on every page and, on "not found" pages, the tree of installed
+  menu entries. That comes from LuCI's core templates, happens with every
+  theme, and cannot be changed by a theme.
 - **Unsigned packages.** Installing with `--allow-untrusted` means apk
   doesn't check who made the files. Check the SHA-256 hashes every time,
-  and rebuild the release if you want independent proof of what it
-  contains.
+  keep `--no-network` on that command so nothing else is installed
+  unchecked, and rebuild the release if you want independent proof of what
+  it contains. With a [signed index](#signed-packages) apk checks the
+  signature itself.
 
 ## Agent-assisted install
 
@@ -583,9 +736,10 @@ Rules. Follow every one; if one gets in the way, stop and ask me.
    computer with `scp -O`.
 4. Show me the exact install commands and wait for my "yes" before any
    `apk add` or `apk del`. Install only with
-   `apk add --allow-untrusted <exact /tmp paths of the Vantage files>`.
-   If a dependency (luci-base, rpcd, rpcd-mod-iwinfo) is missing, ask me,
-   then install it with a plain `apk add` without --allow-untrusted.
+   `apk add --no-network --allow-untrusted <exact /tmp paths of the Vantage files>`.
+   If it reports a missing dependency (such as luci-base, rpcd or
+   rpcd-mod-iwinfo), ask me, then install it with a plain `apk update && apk add <package>`
+   without --allow-untrusted, and repeat the --no-network command.
 5. Never run sysupgrade, firstboot, reboot, mtd or anything that flashes
    firmware. Never change passwords, SSH keys, or the network, wireless,
    firewall or DHCP configuration. Do not run `uci set`/`uci commit`

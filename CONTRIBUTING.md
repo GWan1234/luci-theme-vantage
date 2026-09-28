@@ -30,6 +30,10 @@ to build packages, podman.
 1. **Record** a device once with `dev/mirror/` (read-only: it refuses
    writes, and strips secrets before writing anything). Keep the
    recording outside this repository, e.g. in `../vantage-mirror`.
+   The browser recorder pins the device's TLS certificate: copy it over
+   SSH (`scp -O root@<device>:/etc/uhttpd.crt /tmp/device.crt`) and pass
+   `--cert /tmp/device.crt` (or `--spki <pin>`; see the header of
+   `dev/mirror/record-browser.js`).
 2. **Replay** it with the theme and app from your working tree, plus a
    LuCI 25.12 root filesystem for LuCI's own templates and static files
    (`--rootfs`, see [`dev/replay/README.md`](dev/replay/README.md)):
@@ -80,7 +84,12 @@ dev/build/sdk-build.sh 25.12.4
 - **Least privilege.** A new ubus call needs its `rpc.declare`, an ACL
   entry and an allowlist entry in `security-tests/test_acl_policy.js`, with
   the reason in the pull request. The app stays read-only apart from its
-  own `/etc/config/vantage`.
+  own `/etc/config/vantage`, which it writes only through its rpcd plugin
+  (`luci.vantage set_alias`, validated on the device); no ACL group grants
+  uci writes, and nothing reads Wi-Fi keys. Changes to the plugin's name
+  rules go into `names.js` and `dev/replay/vantage-plugin.js` as well;
+  `tests/plugin.test.js` compares them (the real plugin runs when
+  `UCODE=/path/to/ucode` points at a host ucode binary).
 - **Theme and app stay independent.** The app uses only the theme's
   `--v-*` custom properties (with fallbacks) and its own `vt-*` classes.
 
@@ -103,4 +112,5 @@ dev/build/sdk-build.sh 25.12.4
   the templates or the install scripts.
 
 By contributing you agree that your contribution is licensed under the
-Apache License 2.0, like the rest of the project.
+GNU General Public License, version 3 or any later version
+(GPL-3.0-or-later), like the rest of the project.

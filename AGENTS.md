@@ -13,7 +13,7 @@ Two OpenWrt 25.12 LuCI packages plus offline tooling. No npm, no
 | Path | What |
 |---|---|
 | `luci-theme-vantage/` | Theme: ucode templates (`ucode/template/themes/vantage/*.ut`), CSS and icons (`htdocs/luci-static/vantage/`), shell script (`htdocs/luci-static/resources/menu-vantage.js`, `vantage-theme/host.js`), `root/etc/uci-defaults/30_luci-theme-vantage`, `postrm` in the `Makefile` |
-| `luci-app-vantage/` | Dashboard at `admin/dashboard`: view (`htdocs/.../view/vantage/overview.js`), modules (`htdocs/.../vantage/*.js`), `app.css`, menu entry, rpcd ACL (`root/usr/share/rpcd/acl.d/`), default `/etc/config/vantage` |
+| `luci-app-vantage/` | Dashboard at `admin/dashboard`: view (`htdocs/.../view/vantage/overview.js`), modules (`htdocs/.../vantage/*.js`), `app.css`, menu entry, rpcd ACL (`root/usr/share/rpcd/acl.d/`), rpcd ucode plugin `luci.vantage` (`root/usr/share/rpcd/ucode/luci.vantage`), default `/etc/config/vantage` |
 | `dev/replay/` | Offline LuCI server that replays a recording; see its README |
 | `dev/mirror/` | Recorders that read a real device. Do not run them (rule 1) |
 | `dev/build/` | `sdk-build.sh`: reproducible build in the OpenWrt SDK image (podman) |
@@ -45,14 +45,21 @@ Two OpenWrt 25.12 LuCI packages plus offline tooling. No npm, no
    this.
 5. **Templates escape everything.** `{{ }}` does not escape: use
    `entityencode(v, true)`, and `striptags()` for titles. Never output
-   `fuser`. Pages for visitors who are not logged in (login, 404, CSRF)
-   show nothing about the device. Inline scripts carry no data. Stay within
+   `fuser`. On pages for visitors who are not logged in (login, 404,
+   CSRF) the theme adds nothing about the device (LuCI's core header
+   still prints its `L.env` script; that is upstream, see
+   `docs/luci-contract.md` section 2). Inline scripts carry no data. Stay within
    the ucode subset that `dev/replay/ut.js` compiles. `test_templates.js`
    enforces this.
 6. **The ACL stays minimal and matches the code.** Every `rpc.declare` in
    the app must be granted in `luci-app-vantage.json`, and every grant must
-   be used. The read group is read-only; the write group
-   (`luci-app-vantage-names`) may only write uci `vantage`; no `file.exec`.
+   be used. The read group is read-only and never reads Wi-Fi keys
+   (wireless data comes from the plugin's `wireless` method); reverse DNS
+   sits in its own optional group (`luci-app-vantage-rdns`); the names
+   group (`luci-app-vantage-names`) grants only the plugin's `set_alias`,
+   which validates and writes `/etc/config/vantage` itself. No group
+   grants uci writes; no `file.exec`. The plugin's name rules must match
+   `names.js` and `dev/replay/vantage-plugin.js` (`tests/plugin.test.js`).
    Adding a call means changing the view, the ACL JSON and the allowlist in
    `security-tests/test_acl_policy.js` together, and saying why in the
    commit message. Point out any ACL change to the human.
@@ -98,7 +105,7 @@ only changes an in-memory overlay. Pick a free port. The replay listens on
 Run all of these before you call a change done:
 
 ```sh
-node --test tests/
+node --test tests/            # UCODE=/path/to/ucode also runs the real rpcd plugin
 node security-tests/check_dom_sinks.js
 node security-tests/test_templates.js
 node security-tests/test_acl_policy.js

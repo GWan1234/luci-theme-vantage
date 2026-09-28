@@ -64,6 +64,38 @@ is_authenticated, menu_json, rollback_pending}`, `striptags`,
   `luci_password`, autocomplete `username` / `current-password`.
 - No CSP from core; keep inline script minimal and data-free.
 
+### What core adds to every page, whatever the theme
+
+The theme cannot change these; they come from luci-base and hold for
+Bootstrap and every other theme alike.
+
+- Core `header.ut` includes the theme header and then prints
+  `<script src="{{ resource }}/luci.js?v=<LuCI build>-<mtime of
+  /lib/apk/db/installed>">` and `L = new LuCI({...})` with `pathinfo`,
+  `requestpath`, `dispatchpath`, `sessionid` and **`nodespec:
+  dispatched`**. This includes pages for visitors who are not logged in:
+  the login page (`sysauth.ut` includes the core header) and error pages.
+- On an anonymous 404 (`/cgi-bin/luci/<anything but admin>`) the
+  dispatcher resolves no node, falls back to the root of the page tree,
+  and `dispatched` **is the whole tree**: every installed module and app,
+  their view paths, ACL group names, `depends` (file paths, uci configs)
+  and `satisfied` flags (`dispatcher.uc` `resolve_page`, then
+  `runtime.env.dispatched = tree`). `luci.js` only reads
+  `nodespec.satisfied` and `nodespec.readonly` (`hasViewPermission`), so a
+  luci-base change printing just those two (or `null` without a session)
+  would close it; that is an upstream fix, not a theme one.
+  `security-tests/test_templates.js` renders this page around the theme
+  and tracks it as a known failure.
+- The JSON in that script is escaped only for `/` (`replace(..., '/',
+  '\\/')`), not `<`. A request path containing `<!--<script>` puts the
+  browser's HTML parser into the "script data double escaped" state: the
+  core script's `</script>` no longer ends it, the rest of the page is
+  read as script, and the page stays blank. Nothing runs (the swallowed
+  text is a syntax error), so this is a denial of that one page view, and
+  the only fix is escaping `<` as `\u003c` in core `header.ut`. The theme
+  header runs before this script and cannot repair it.
+- Core `footer.ut` prints `media_error` (a theme that failed to render).
+
 ## 3. DOM hooks
 
 | Hook | Owner | Notes |

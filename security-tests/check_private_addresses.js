@@ -31,9 +31,17 @@
  *         12-hex-digit form (bare only when "mac" or "bssid" appears earlier
  *         on the line) outside the allowlist below;
  *   mirror identifiers  (when the private data mirror is available) the
- *         hostnames, SSIDs, DNS/mDNS names, search domains and global IPv4
- *         addresses recorded from the real device. They are read at run
- *         time and never written anywhere; findings show them masked.
+ *         hostnames, SSIDs, DNS/mDNS names, search domains, WPS device
+ *         names, client names from DHCP logs and global IPv4 addresses
+ *         recorded from the real device, including names with spaces or
+ *         quotes. They are read at run time and never written anywhere;
+ *         findings show them masked. A name matches as a whole word, with
+ *         any run of whitespace for a space, and also in its JSON-escaped,
+ *         HTML-entity and URL-encoded forms. Names of 4+ characters match
+ *         in any case; 2-3 character names only in their recorded case.
+ *         False positives (a recorded name that is also an ordinary word
+ *         in the tree) go in <mirror>/identifier-allowlist.txt, one per
+ *         line.
  *
  * MAC allowlist (policy):
  *   00:00:5E:00:53:00/24  RFC 7042 documentation unicast range; tests may
@@ -148,11 +156,54 @@ function v6finding(text) {
 
 function macNorm(hex) { return hex.toLowerCase().match(/../g).join(':'); }
 
-/* identifiers: Map lowercased value -> kind */
+/* one regex per identifier: whole word, whitespace runs as \s+, any case
+   from 4 characters on */
+const idCache = new WeakMap();
+function identifierRes(identifiers) {
+	if (!identifiers || !identifiers.size) return [];
+	let res = idCache.get(identifiers);
+	if (!res) {
+		res = [ ...identifiers ].map(([ v, kind ]) => {
+			const src = v.trim().split(/\s+/).map(w => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+');
+			return [ new RegExp('(?<![A-Za-z0-9])' + src + '(?![A-Za-z0-9])', v.length >= 4 ? 'i' : ''), v, kind ];
+		});
+		idCache.set(identifiers, res);
+	}
+	return res;
+}
+
+/* the forms a value takes in committed files: as is, JSON-escaped,
+   HTML entities, URL-encoded */
+const ENTITIES = { quot: '"', amp: '&', lt: '<', gt: '>', apos: "'", nbsp: '\u00a0' };
+function jsonUnescape(s) {
+	return s.replace(/\\u([0-9A-Fa-f]{4})/g, (m, h) => String.fromCharCode(parseInt(h, 16)))
+		.replace(/\\([\\"'\/bfnrt])/g, (m, c) => ({ b: '\b', f: '\f', n: '\n', r: '\r', t: '\t' })[c] || c);
+}
+function htmlDecode(s) {
+	return s.replace(/&(?:#(\d{1,7})|#[xX]([0-9A-Fa-f]{1,6})|([a-z]+));/g, (m, d, h, n) => {
+		const cp = d ? +d : h ? parseInt(h, 16) : null;
+		if (cp != null) return cp <= 0x10ffff ? String.fromCodePoint(cp) : m;
+		return ENTITIES[n] ?? m;
+	});
+}
+function urlDecode(s) {
+	return s.replace(/\+/g, ' ').replace(/(?:%[0-9A-Fa-f]{2})+/g, m => {
+		try { return decodeURIComponent(m); } catch (e) { return m.replace(/%([0-9A-Fa-f]{2})/g, (x, h) => String.fromCharCode(parseInt(h, 16))); }
+	});
+}
+function views(line) {
+	const out = new Set([ line ]);
+	if (/[\\&%+]/.test(line)) {
+		const j = jsonUnescape(line), h = htmlDecode(line);
+		for (const v of [ j, h, urlDecode(line), htmlDecode(j), jsonUnescape(h), urlDecode(j) ]) out.add(v);
+	}
+	return [ ...out ];
+}
+
+/* identifiers: Map value -> kind (from mirrorIdentifiers) */
 function findings(text, identifiers) {
 	const out = [];
-	const idRes = identifiers && identifiers.size ? [ ...identifiers ].map(([ v, kind ]) =>
-		[ new RegExp('(?<![A-Za-z0-9])' + v.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?![A-Za-z0-9])', 'i'), v, kind ]) : [];
+	const idRes = identifierRes(identifiers);
 	text.split('\n').forEach((line, i) => {
 		const n = i + 1;
 		for (const m of line.matchAll(IPV4)) {
@@ -170,7 +221,10 @@ function findings(text, identifiers) {
 		for (const m of line.matchAll(MAC_DOT)) macs.push([ m[1], m[1].replace(/[^0-9A-Fa-f]/g, '') ]);
 		for (const m of line.matchAll(MAC_BARE)) if (MAC_CONTEXT.test(line.slice(0, m.index))) macs.push([ m[1], m[1] ]);
 		for (const [ shown, hex ] of macs) if (!MAC_ALLOWED.test(macNorm(hex))) out.push([ n, `MAC address ${shown}` ]);
-		for (const [ re, v, kind ] of idRes) if (re.test(line)) out.push([ n, `${kind} from the device mirror (${mask(v)})` ]);
+		if (idRes.length) {
+			const forms = views(line);
+			for (const [ re, v, kind ] of idRes) if (forms.some(f => re.test(f))) out.push([ n, `${kind} from the device mirror (${mask(v)})` ]);
+		}
 	});
 	return out;
 }
@@ -185,15 +239,37 @@ function mask(v) {
 const GENERIC = new Set([ 'openwrt', 'localhost', 'lan', 'wan', 'local', 'home', 'localdomain', 'home.arpa', 'internal',
 	'router', 'accesspoint', 'default', 'unknown', 'hidden', '(hidden)', 'guest', 'test', 'none', 'true', 'false', 'null',
 	'hostname', 'name', 'ssid', 'domain', 'model', 'device', 'client', 'station' ]);
-const NAME_KEYS = new Set([ 'hostname', 'ssid', 'mesh_id', 'domain', 'dns_search', 'dns-search', 'fqdn', 'wps_device_name' ]);
+const NAME_KEYS = new Set([ 'hostname', 'ssid', 'mesh_id', 'domain', 'dns_search', 'dns-search', 'fqdn', 'wps_device_name', 'device_name' ]);
+/* client names only a log line carries: dnsmasq's DHCPACK(<if>) <ip> <mac>
+   <name> and "not giving name <name> to the DHCP lease" */
+const LOG_NAMES = [
+	/\bDHCPACK\([^)]*\)\s+\S+\s+(?:[0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}\s+([^\s*]\S*)/g,
+	/\bnot giving name\s+(\S+)\s+to\b/g
+];
+function logHostnames(text) {
+	const names = [];
+	if (typeof text !== 'string' || !/DHCPACK|not giving name/.test(text)) return names;
+	for (const re of LOG_NAMES) for (const m of text.matchAll(re)) names.push(m[1]);
+	return names;
+}
 
+/* Map value -> kind. Values keep their recorded case (short names match
+   case-sensitively); 4+ character names are kept once per spelling. */
 function mirrorIdentifiers(dir) {
-	const ids = new Map();
+	const ids = new Map(), seen = new Set();
+	let allow = new Set();
+	try {
+		allow = new Set(fs.readFileSync(path.join(dir, 'identifier-allowlist.txt'), 'utf8').split('\n')
+			.map(l => l.trim()).filter(l => l && !l.startsWith('#')).map(l => l.toLowerCase()));
+	} catch (e) {}
 	function add(v, kind) {
 		if (typeof v !== 'string') return;
 		v = v.trim().replace(/\.$/, '');
-		if (v.length < 4 || v.length > 100 || /^[\d.:]+$/.test(v) || GENERIC.has(v.toLowerCase()) || /[\s"'<>\\]/.test(v)) return;
-		if (!ids.has(v.toLowerCase())) ids.set(v.toLowerCase(), kind);
+		if (v.length < 2 || v.length > 100 || /[\x00-\x1f\x7f]/.test(v) || /^[\d.:\s]+$/.test(v) || GENERIC.has(v.toLowerCase()) || allow.has(v.toLowerCase())) return;
+		const key = v.length >= 4 ? v.toLowerCase() : v;
+		if (seen.has(key)) return;
+		seen.add(key);
+		ids.set(v, kind);
 	}
 	function addIp(v) {
 		if (typeof v !== 'string') return;
@@ -213,9 +289,11 @@ function mirrorIdentifiers(dir) {
 			return;
 		}
 		if (typeof x !== 'string') return;
-		if (NAME_KEYS.has(key)) add(x, key === 'ssid' || key === 'mesh_id' ? 'SSID' : 'hostname');
-		if (key === 'name' && /^luci-rpc (getHostHints|getDHCPLeases)$/.test(ctx)) add(x, 'hostname');
+		if (NAME_KEYS.has(key)) add(x, key === 'ssid' || key === 'mesh_id' ? 'SSID' : key.endsWith('device_name') ? 'WPS device name' : 'hostname');
+		if (key === 'name' && /^(luci-rpc (getHostHints|getDHCPLeases)|dhcp ipv[46]leases|uci get dhcp)$/.test(ctx)) add(x, 'hostname');
+		if (key === 'signature') { const m = /(?:^|[|,:])wps:([^|,]{1,64})/.exec(x); if (m) { add(m[1], 'WPS device name'); add(m[1].replace(/_/g, ' '), 'WPS device name'); } }
 		if (ctx === 'network.rrdns lookup') add(x, 'reverse DNS name');
+		for (const n of logHostnames(x)) add(n, 'hostname from a DHCP log');
 		addIp(x);
 	}
 	function file(p) {
@@ -225,12 +303,13 @@ function mirrorIdentifiers(dir) {
 			if (!line.trim()) continue;
 			let r;
 			try { r = JSON.parse(line); } catch (e) { continue; }
-			walk(r.result, null, `${r.object} ${r.method}`);
+			if (typeof r.object === 'string') walk(r.result, null, `${r.object} ${r.method}${r.object === 'uci' && r.args && typeof r.args.config === 'string' ? ' ' + r.args.config : ''}`);
+			else if (typeof r.body === 'string') for (const n of logHostnames(r.body)) add(n, 'hostname from a DHCP log');
 		}
 	}
 	for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
 		if (!e.isDirectory()) continue;
-		for (const f of [ 'rpc.jsonl', 'snapshots.jsonl' ]) file(path.join(dir, e.name, f));
+		for (const f of [ 'rpc.jsonl', 'snapshots.jsonl', 'http.jsonl' ]) file(path.join(dir, e.name, f));
 	}
 	return ids;
 }
@@ -279,7 +358,8 @@ function scan(targets, identifiers) {
 
 function selfTest() {
 	let ok = true;
-	const ids = new Map([ [ 'example-host-1234', 'hostname' ], [ '198.18.7.9', 'public IPv4' ] ]);
+	const ids = new Map([ [ 'example-host-1234', 'hostname' ], [ '198.18.7.9', 'public IPv4' ], [ 'Example Home Net', 'SSID' ],
+		[ "Pat's-AP", 'SSID' ], [ 'Quote"d Host', 'hostname' ], [ 'zed', 'hostname' ], [ 'Lab <AP>', 'SSID' ] ]);
 	for (const [ name, wantHits ] of [ [ 'addresses_bad.txt', true ], [ 'addresses_good.txt', false ] ]) {
 		const lines = fs.readFileSync(path.join(FIXTURES, name), 'utf8').split('\n');
 		const hits = new Set(findings(lines.join('\n'), ids).map(f => f[0]));
@@ -322,6 +402,6 @@ function main(argv) {
 
 /* importable: dev/replay/demo.js reuses the detectors and the mirror
    identifier list for its pseudonymiser and its test */
-module.exports = { findings, mirrorIdentifiers, v4finding, v6finding, v6groups, IPV4, IPV6, MAC_SEP, MAC_DOT, MAC_ALLOWED, GENERIC, NAME_KEYS, PUBLIC_EXEMPT_V4, inV4, v4int };
+module.exports = { findings, mirrorIdentifiers, logHostnames, views, mask, v4finding, v6finding, v6groups, IPV4, IPV6, MAC_SEP, MAC_DOT, MAC_BARE, MAC_CONTEXT, MAC_ALLOWED, GENERIC, NAME_KEYS, PUBLIC_EXEMPT_V4, inV4, v4int };
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));

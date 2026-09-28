@@ -2,16 +2,17 @@
 # Vantage - a LuCI theme for OpenWrt
 # Copyright (C) 2026 anothaDev
 #
-# This is free software, licensed under the Apache License, Version 2.0.
+# This is free software, licensed under the GNU General Public License,
+# version 3 or (at your option) any later version.
 # Original work; see NOTICE.
 #
 
 include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-theme-vantage
-PKG_VERSION:=1.0.0
+PKG_VERSION:=1.0.1
 PKG_RELEASE:=1
-PKG_LICENSE:=Apache-2.0
+PKG_LICENSE:=GPL-3.0-or-later
 
 LUCI_TITLE:=Vantage theme
 LUCI_DESCRIPTION:=A console-style LuCI theme: icon rail with flyouts, \

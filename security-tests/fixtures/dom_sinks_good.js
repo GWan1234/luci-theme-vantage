@@ -147,3 +147,21 @@ function goodBypassNeighbours(el, c) {
 		spec
 	];
 }
+
+/* CSS, selectors, regular expressions and history URLs: safe forms */
+function goodCss(el, n, x, sheet) {
+	el.style.width = n.toFixed(1) + '%';
+	el.style.cssText = 'display:none';
+	el.style.setProperty('--h', (n * 2).toFixed(0));
+	el.style['--x'] = '1px';
+	Object.assign(el.style, { width: '1px', height: n.toFixed(0) + 'px' });
+	fetch(L.resource('x/app.css')).then(function(r) { return r.text(); }).then(function(text) { sheet.replaceSync(text); });
+	sheet.insertRule('.a { color: red }');
+	el.querySelector('div[id="graph"]');
+	el.querySelector('[data-mac="' + CSS.escape(x) + '"]');
+	el.closest('.row');
+	new RegExp('^a+$');
+	history.replaceState(null, '', '#client=' + encodeURIComponent(x));
+	history.replaceState(null, '', location.pathname + location.search);
+	this.matches(x);
+}

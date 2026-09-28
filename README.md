@@ -6,7 +6,7 @@
 
 **A LuCI theme and live network dashboard for OpenWrt 25.12, built from scratch.**
 
-![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2?style=flat-square) ![LuCI theme + app](https://img.shields.io/badge/LuCI-theme%20%2B%20app-5a6472?style=flat-square) ![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-3d8b40?style=flat-square)
+![OpenWrt 25.12](https://img.shields.io/badge/OpenWrt-25.12-00B5E2?style=flat-square) ![LuCI theme + app](https://img.shields.io/badge/LuCI-theme%20%2B%20app-5a6472?style=flat-square) ![License: GPL-3.0-or-later](https://img.shields.io/badge/license-GPL--3.0--or--later-3d8b40?style=flat-square)
 
 </div>
 
@@ -93,7 +93,7 @@ the same files install on any target. Get them from a
 ```sh
 sha256sum -c SHA256SUMS
 scp -O luci-theme-vantage-*.apk luci-app-vantage-*.apk root@192.0.2.1:/tmp/
-ssh root@192.0.2.1 'apk add --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
+ssh root@192.0.2.1 'apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
 ```
 
 Log out of LuCI and back in; the dashboard is now the landing page. On a
@@ -114,9 +114,13 @@ With podman and the official OpenWrt SDK image:
 dev/build/sdk-build.sh 25.12.4          # builds HEAD into dist/25.12.4/
 ```
 
-The script builds from a clean clone of the commit, so the same commit
-always produces byte-identical packages; `dist/<release>/SHA256SUMS` lists
-their hashes.
+The script builds from a clean clone of the commit in an SDK image pinned
+by digest, so the same commit, SDK release and image always produce
+byte-identical packages. It checks every package against the commit's
+source (`security-tests/verify_built_apk.js`) before writing it to
+`dist/<release>/`, next to `SHA256SUMS` and a `BUILDINFO` with the build
+inputs. Optional index signing and the details are in the
+[install guide](docs/INSTALL.md#build-from-source).
 
 ## Develop
 
@@ -161,17 +165,25 @@ node security-tests/test_acl_policy.js
 ## Security
 
 - **Read-only dashboard.** The app's rpcd ACL grants read methods only
-  (system, network, iwinfo, hostapd status, host hints, reverse DNS, mDNS,
-  `/proc/stat`) and no `file.exec`. Its one write, device names, is limited
-  to its own `/etc/config/vantage` in a separate ACL group. The read group
-  includes `luci-rpc getWirelessDevices`, which returns the wireless
-  configuration including Wi-Fi keys; its description says so.
+  (system, network, iwinfo, hostapd status, host hints, mDNS, `/proc/stat`)
+  and no `file.exec`. Wireless configuration comes from the app's own rpcd
+  ucode plugin (`luci.vantage wireless`), which leaves out Wi-Fi keys,
+  SAE passwords and RADIUS secrets. Reverse DNS (`network.rrdns lookup`,
+  which lets its holder aim the device's DNS queries at any server) is a
+  separate, optional group, `luci-app-vantage-rdns`. The one write, device
+  names, goes through the plugin's `set_alias`, which validates the name
+  and MAC on the device and writes only `/etc/config/vantage` (at most 512
+  names); it is in its own group, `luci-app-vantage-names`. No group grants
+  uci writes.
 - **No markup from data.** Every DOM node is built with `E()` and text
   nodes; `check_dom_sinks.js` rejects `innerHTML` and other HTML sinks.
 - **Templates.** `test_templates.js` renders the theme's templates with
   hostile input and checks that markup stays stable, inline scripts carry
-  no data, the login error is generic and logged-out pages reveal nothing
-  about the device.
+  no data, the login error is generic and the theme adds nothing about the
+  device to logged-out pages. LuCI's core header still adds its `L.env`
+  script to every page (on anonymous 404 pages including the menu tree);
+  that is upstream behaviour, tracked as a known failure, see
+  `docs/luci-contract.md` section 2.
 - **ACL policy.** `test_acl_policy.js` checks that the ACL grants exactly
   the methods the app declares, and nothing more.
 - **No private data in the tree.** `check_private_addresses.js` rejects
@@ -197,5 +209,6 @@ issue.
 
 ## License
 
-Apache License 2.0, see [`LICENSE`](LICENSE) and
+GNU General Public License v3.0 or later (GPL-3.0-or-later), see
+[`LICENSE`](LICENSE) and
 [`luci-theme-vantage/NOTICE`](luci-theme-vantage/NOTICE).

@@ -17,14 +17,27 @@
    are run through a small ucode template engine (ut.js).
 
    --demo pseudonymises the recording as it is loaded (demo.js): documentation
-   MACs/addresses, neutral hostname/SSIDs/client names, for screenshots. */
+   MACs/addresses, neutral hostname/SSIDs/client names, for screenshots.
+
+   Trust model: the templates (--templates, --theme-dir, the theme and app
+   packages) and the --rootfs dump are executed as JavaScript with your
+   privileges (ut.js compiles .ut files to functions). This is not a
+   sandbox: use only themes and dumps you trust, or run the replay in a
+   disposable container or as an unprivileged user. Recorded data and HTTP
+   requests only ever reach templates as values.
+
+   HTTP: only requests addressed to 127.0.0.1/localhost/[::1] on --port are
+   answered (DNS rebinding), cross-site POSTs are refused (CSRF), ubus
+   calls need the session the login created (or fall under rpcd's
+   "unauthenticated" ACL of the rootfs), and request-derived text is escaped
+   before it reaches HTML or the terminal. */
 
 const fs = require('fs');
 const http = require('http');
 const path = require('path');
 const crypto = require('crypto');
 const { Engine } = require('./ut');
-const { Store } = require('./store');
+const { Store, safe } = require('./store');
 const policy = require('../mirror/policy');
 
 /* ------------------------------------------------------------ arguments */
@@ -194,6 +207,27 @@ function parseUci(text) {
 	return out;
 }
 
+/* rpcd ACL group "unauthenticated" of the rootfs: what a call without the
+   login session may do (session.access/login, luci.getFeatures) */
+const anonAcl = new Map();
+{
+	const dir = path.join(rootfs, 'usr/share/rpcd/acl.d');
+	let files = [];
+	try { files = fs.readdirSync(dir).filter(f => f.endsWith('.json')); } catch (e) {}
+	for (const f of files) {
+		let acl;
+		try { acl = JSON.parse(readText(path.join(dir, f))); } catch (e) { continue; }
+		const ubus = acl && acl.unauthenticated && acl.unauthenticated.read && acl.unauthenticated.read.ubus;
+		if (!ubus || typeof ubus !== 'object') continue;
+		for (const [ obj, methods ] of Object.entries(ubus))
+			if (Array.isArray(methods)) for (const m of methods) if (typeof m === 'string') {
+				if (!anonAcl.has(obj)) anonAcl.set(obj, new Set());
+				anonAcl.get(obj).add(m);
+			}
+	}
+}
+const anonAllowed = (o, m) => anonAcl.has(o) && (anonAcl.get(o).has(m) || anonAcl.get(o).has('*'));
+
 const luciMain = store.uciGet('luci', 'main') || {};
 const lang = (!luciMain.lang || luciMain.lang === 'auto') ? 'en' : String(luciMain.lang).replace('_', '-');
 const startTime = Math.floor(Date.now() / 1000);
@@ -343,10 +377,10 @@ function templateEnv(req, resolved, loggedIn, form) {
 /* --------------------------------------------------------------- server */
 
 function cookies(req) {
-	const out = {};
+	const out = Object.create(null);
 	for (const part of String(req.headers.cookie || '').split(/;\s*/)) {
 		const i = part.indexOf('=');
-		if (i > 0) out[part.slice(0, i)] = decodeURIComponent(part.slice(i + 1));
+		if (i > 0) { try { out[part.slice(0, i)] = decodeURIComponent(part.slice(i + 1)); } catch (e) {} }
 	}
 	return out;
 }
@@ -360,10 +394,33 @@ function readBody(req) {
 	});
 }
 
+/* on every response; LuCI needs inline and eval'd scripts, so the CSP is
+   defence in depth and escaping is the real guard */
+const HARDENING = {
+	'X-Content-Type-Options': 'nosniff',
+	'X-Frame-Options': 'DENY',
+	/* not no-referrer: under that policy Chromium sends "Origin: null" on
+	   same-origin form posts */
+	'Referrer-Policy': 'same-origin',
+	'Cross-Origin-Resource-Policy': 'same-origin',
+	'Cross-Origin-Opener-Policy': 'same-origin'
+};
+const CSP = "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; " +
+	"img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src 'self'; worker-src 'self' blob:; " +
+	"object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'";
+
+function head(res, status, headers) {
+	const h = Object.assign({}, HARDENING, headers || {});
+	if (/^text\/html/i.test(h['Content-Type'] || '')) h['Content-Security-Policy'] = CSP;
+	res.writeHead(status, h);
+}
+
 function send(res, status, type, body, headers) {
-	res.writeHead(status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store' }, headers || {}));
+	head(res, status, Object.assign({ 'Content-Type': type, 'Cache-Control': 'no-store' }, headers || {}));
 	res.end(body);
 }
+
+const esc = s => String(s).replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
 
 const MIME = {
 	'.js': 'application/javascript; charset=UTF-8', '.css': 'text/css; charset=UTF-8', '.svg': 'image/svg+xml',
@@ -406,24 +463,33 @@ function ubusReply(msg) {
 	const reply = { jsonrpc: '2.0', id: msg && msg.id !== undefined ? msg.id : null };
 	if (!msg || typeof msg !== 'object' || msg.jsonrpc !== '2.0' || typeof msg.method !== 'string' || msg.id == null)
 		return Object.assign(reply, { id: null, error: { code: -32600, message: 'Invalid request' } });
+	/* object and method names only, as uhttpd lists them */
 	if (msg.method === 'list')
 		return Object.assign(reply, { result: store.list(msg.params) });
 	if (msg.method !== 'call')
 		return Object.assign(reply, { error: { code: -32601, message: 'Method not found' } });
 	if (!Array.isArray(msg.params) || msg.params.length < 3)
 		return Object.assign(reply, { error: { code: -32600, message: 'Invalid parameters' } });
-	const [ , object, method, args ] = msg.params;
+	const [ sid, object, method, args ] = msg.params;
 	if (args != null && (typeof args !== 'object' || Array.isArray(args)))
 		return Object.assign(reply, { error: { code: -32602, message: 'Invalid parameters' } });
+	if (sid !== SID) {
+		/* like rpcd: without the login session only the unauthenticated ACL */
+		if (!anonAllowed(object, method)) return Object.assign(reply, { error: { code: -32002, message: 'Access denied' } });
+		if (object === 'session' && method === 'access')
+			return Object.assign(reply, { result: [ 0, { access: !!(args && args.scope === 'ubus' && anonAllowed(args.object, args.function)) } ] });
+	}
 	return Object.assign(reply, store.call(object, method, args || {}));
 }
 
 async function handleUbus(req, res) {
 	if (req.method !== 'POST') return send(res, 405, 'text/plain', 'Method Not Allowed');
+	/* LuCI's rpc.js posts JSON; a text/plain "simple" cross-site POST is not */
+	if (!/^application\/json\s*(;|$)/i.test(req.headers['content-type'] || '')) return send(res, 415, 'text/plain', 'Unsupported Media Type');
 	let body;
 	try { body = JSON.parse(await readBody(req)); }
 	catch (e) { return send(res, 200, 'application/json', JSON.stringify({ jsonrpc: '2.0', id: null, error: { code: -32700, message: 'Parse error' } })); }
-	send(res, 200, 'application/json; charset=UTF-8', JSON.stringify(Array.isArray(body) ? body.map(ubusReply) : ubusReply(body)));
+	send(res, 200, 'application/json; charset=UTF-8', JSON.stringify(Array.isArray(body) ? body.map(m => ubusReply(m)) : ubusReply(body)));
 }
 
 /* /admin/uci/* endpoints of the apply/confirm/revert flow */
@@ -451,23 +517,23 @@ function renderPage(res, status, name, env, scope, headers) {
 	let html;
 	try { html = engine.render(name, env, scope); }
 	catch (err) {
-		console.error(`[replay] render ${name}: ${err.stack || err}`);
+		console.error(`[replay] render ${safe(name)}: ${safe(err.stack || err)}`);
 		return send(res, 500, 'text/plain; charset=UTF-8', `Template error while rendering ${name}:\n\n${err.stack || err}`);
 	}
 	send(res, status, 'text/html; charset=UTF-8', html, headers);
 }
 
 async function dispatch(req, res, reqPath, depth) {
-	const form = {};
+	const form = Object.create(null);
 	if (req.method === 'POST' && /x-www-form-urlencoded/.test(req.headers['content-type'] || ''))
 		for (const [ k, v ] of new URLSearchParams(await readBody(req))) form[k] = v;
-	const loggedIn = !!(cookies(req).sysauth_http);
+	const loggedIn = cookies(req).sysauth_http === SID;
 	const resolved = resolvePage(reqPath);
 	const needAuth = resolved.ctx.auth && Object.keys(resolved.ctx.auth).length > 0;
 
 	if (needAuth && !loggedIn) {
 		if (form.luci_username != null && form.luci_password != null) {
-			res.writeHead(302, { 'Location': buildUrl(...resolved.ctx.request_path),
+			head(res, 302, { 'Location': buildUrl(...resolved.ctx.request_path),
 				'Set-Cookie': `sysauth_http=${SID}; path=${SCRIPT}/; SameSite=strict; HttpOnly`, 'Cache-Control': 'no-store' });
 			return res.end();
 		}
@@ -496,38 +562,73 @@ async function dispatch(req, res, reqPath, depth) {
 		return dispatch(req, res, reqPath.slice(action.remove || 0).concat(action.path.split('/'), resolved.ctx.request_args), depth + 1);
 	}
 	const what = action ? `${action.type} action${action.path ? ' ' + action.path : action.function ? ' ' + action.module + '.' + action.function : ''}` : 'no page';
-	console.error(`[replay] not replayable: /${reqPath.join('/')} (${what})`);
-	const msg = `No page is registered at '/${reqPath.join('/')}' in the replay (${what}).`;
-	if (engine.exists('error404')) return renderPage(res, 404, 'error404', env, { message: msg });
-	send(res, 404, 'text/plain', msg);
+	const where = '/' + reqPath.join('/');
+	console.error(`[replay] not replayable: ${safe(where)} (${safe(what)})`);
+	/* error404.ut prints the message raw; the path is entity-encoded like
+	   upstream's dispatcher does */
+	if (engine.exists('error404')) return renderPage(res, 404, 'error404', env, { message: `No page is registered at '${esc(where)}' in the replay (${esc(what)}).` });
+	send(res, 404, 'text/plain; charset=UTF-8', `No page is registered at '${where}' in the replay (${what}).`);
 }
 
 const missing = new Set();
 
+/* the names this server answers to: anything else in Host is a DNS
+   rebinding attempt or a mistake */
+const HOSTS = new Set([ `127.0.0.1:${port}`, `localhost:${port}`, `[::1]:${port}` ]);
+const ORIGINS = new Set([ ...HOSTS ].map(h => 'http://' + h));
+
+function refuseForeign(req, res) {
+	const host = String(req.headers.host || '').toLowerCase();
+	if (!HOSTS.has(host)) {
+		send(res, 421, 'text/plain', 'Misdirected request: this replay only answers to 127.0.0.1, localhost and [::1] on its port\n');
+		return true;
+	}
+	if (req.method !== 'GET' && req.method !== 'HEAD') {
+		/* Sec-Fetch-Site decides when the browser sends it (same-origin, or
+		   none for a user-initiated request); a form POST can carry
+		   "Origin: null" then. Without it, an Origin must be ours. */
+		const site = req.headers['sec-fetch-site'];
+		const origin = req.headers.origin;
+		const own = origin == null || ORIGINS.has(String(origin).toLowerCase());
+		const ok = (site != null) ? ((site === 'same-origin' || site === 'none') && (own || origin === 'null')) : own;
+		if (!ok) {
+			console.error(`[replay] refused cross-site ${safe(req.method)} ${safe(req.url)} (origin ${safe(origin ?? '-')}, sec-fetch-site ${safe(site ?? '-')})`);
+			send(res, 403, 'text/plain', 'Cross-site request refused\n');
+			return true;
+		}
+	}
+	return false;
+}
+
 async function handle(req, res) {
+	if (refuseForeign(req, res)) return;
 	const url = new URL(req.url, 'http://127.0.0.1');
 	let p;
 	try { p = decodeURIComponent(url.pathname); } catch (e) { return send(res, 400, 'text/plain', 'Bad request'); }
-	if (p.includes('\0')) return send(res, 400, 'text/plain', 'Bad request');
+	/* uhttpd/LuCI paths never contain control characters */
+	if (/[\x00-\x1f\x7f]/.test(p)) return send(res, 400, 'text/plain', 'Bad request');
 
 	if (p === '/' || p === '/index.html' || p === SCRIPT) {
-		res.writeHead(302, { 'Location': SCRIPT + '/' }); return res.end();
+		head(res, 302, { 'Location': SCRIPT + '/' }); return res.end();
 	}
 	if (p.startsWith('/luci-static/')) {
 		const file = staticFile(p.slice('/luci-static/'.length));
 		if (!file) {
-			if (!missing.has(p)) { missing.add(p); console.error(`[replay] static ${file === false ? '404 (as on the device)' : 'not found'}: ${p}`); }
+			if (!missing.has(p) && missing.size < 4096) { missing.add(p); console.error(`[replay] static ${file === false ? '404 (as on the device)' : 'not found'}: ${safe(p)}`); }
 			return send(res, 404, 'text/plain', 'Not found');
 		}
-		res.writeHead(200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
+		head(res, 200, { 'Content-Type': MIME[path.extname(file).toLowerCase()] || 'application/octet-stream', 'Cache-Control': 'no-cache' });
 		return fs.createReadStream(file).pipe(res);
 	}
 	if (/^\/ubus(\/|$)/.test(p) || p.startsWith(SCRIPT + '/admin/ubus')) return handleUbus(req, res);
 
 	if (p === '/cgi-bin/cgi-exec') {
 		if (req.method !== 'POST') return send(res, 405, 'text/plain', 'Method Not Allowed');
-		const argv = policy.cgiExecArgv(await readBody(req));
-		const out = argv && store.execText(argv);
+		/* parsed like cgi-io; the session id must be the login's */
+		const r = policy.parseCgiExec(await readBody(req));
+		if (!r.ok || r.sessionid !== SID) return send(res, 403, 'text/plain', 'Exec permission denied');
+		const argv = r.argv;
+		const out = store.execText(argv);
 		if (out == null) {
 			store.warn('unrecorded cgi-exec (answered 403)', JSON.stringify(argv));
 			return send(res, 403, 'text/plain', 'Access to command denied by ACL');
@@ -535,7 +636,7 @@ async function handle(req, res) {
 		return send(res, 200, 'text/plain; charset=UTF-8', out);
 	}
 	if (p.startsWith('/cgi-bin/') && !p.startsWith(SCRIPT + '/')) {
-		console.error(`[replay] refused ${req.method} ${p}`);
+		console.error(`[replay] refused ${safe(req.method)} ${safe(p)}`);
 		return send(res, 403, 'text/plain', 'Not available in the replay');
 	}
 	if (!p.startsWith(SCRIPT + '/')) return send(res, 404, 'text/plain', 'Not found');
@@ -548,10 +649,12 @@ async function handle(req, res) {
 	if (segs[0] === 'admin' && segs[1] === 'uci' && segs[2]) {
 		if (req.method !== 'POST') return send(res, 405, 'text/plain', 'Method Not Allowed');
 		await readBody(req);
+		/* ui.js sends ?sid=<session>; the cookie comes along same-origin */
+		if (cookies(req).sysauth_http !== SID && url.searchParams.get('sid') !== SID) return send(res, 403, 'text/plain', 'Forbidden');
 		return handleUciAction(segs[2], res);
 	}
 	if (sub === 'admin/logout') {
-		res.writeHead(302, { 'Location': SCRIPT + '/', 'Set-Cookie': `sysauth_http=; expires=Thu, 01 Jan 1970 01:00:00 GMT; path=${SCRIPT}/` });
+		head(res, 302, { 'Location': SCRIPT + '/', 'Set-Cookie': `sysauth_http=; expires=Thu, 01 Jan 1970 01:00:00 GMT; path=${SCRIPT}/` });
 		return res.end();
 	}
 	return dispatch(req, res, segs, 0);
@@ -559,8 +662,8 @@ async function handle(req, res) {
 
 const server = http.createServer((req, res) => {
 	handle(req, res).catch(err => {
-		console.error(`[replay] ${req.method} ${req.url}: ${err.stack || err}`);
-		if (!res.headersSent) send(res, 500, 'text/plain', String(err));
+		console.error(`[replay] ${safe(req.method)} ${safe(req.url)}: ${safe(err.stack || err)}`);
+		if (!res.headersSent) send(res, 500, 'text/plain', 'Internal error (see the replay log)');
 		else res.end();
 	});
 });
@@ -573,4 +676,5 @@ server.listen(port, '127.0.0.1', () => {
 	console.error(`[replay] ${store.exact.size} recorded calls, ${store.series.size} time series (${store.interval} ms), ${store.exec.size} exec outputs`);
 	if (store.demo) console.error(`[replay] DEMO mode: recording pseudonymised (${store.demo.macs.size} MACs, ${store.demo.v4nets.size + store.demo.v4other.size} IPv4 networks/addresses, ${store.demo.v6nets.size} IPv6 prefixes, ${store.demo.names.size} names)`);
 	console.error(`[replay] synthetic data ${store.synthetic ? 'ON (realtime stats, conntrack list, wifi scan; --no-synthetic to disable)' : 'OFF'}`);
+	if (store.plugins.size) console.error(`[replay] plugins: ${[ ...store.plugins.keys() ].join(', ')}`);
 });

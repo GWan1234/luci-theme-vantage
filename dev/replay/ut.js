@@ -13,7 +13,14 @@
    Code runs as JavaScript in a scope where unknown names read as null.
    ucode and JS agree on the syntax LuCI templates use (let/const, arrow
    functions, ?., ??, template literals, regex literals); anything beyond
-   that fails with the template name in the error. */
+   that fails with the template name in the error.
+
+   Trust model: a template is code. It runs in this Node process with the
+   developer's privileges and can reach anything Node can (the scope below
+   is for ucode semantics, not isolation: any function literal leads to the
+   Function constructor). Only render templates you trust: your own theme,
+   LuCI's, a rootfs dump of your own device. Data (recorded replies, HTTP
+   request values) is only ever passed in as values, never compiled. */
 
 const fs = require('fs');
 const path = require('path');
@@ -301,6 +308,10 @@ const stdlib = {
 	N_: (n, s, p) => n == 1 ? s : p
 };
 
+/* template scopes inherit from stdlib; keep Object.prototype (and anything
+   ever added to it) out of that chain */
+Object.setPrototypeOf(stdlib, null);
+
 /* ------------------------------------------------------------------ engine */
 
 /* roots: template directories searched in order; builtins: name -> source
@@ -378,10 +389,12 @@ class Engine {
 	}
 }
 
-/* scope where unknown identifiers read as null instead of throwing */
+/* scope where unknown identifiers read as null instead of throwing. The
+   compiler's own names (__scope, __rt) are never looked up in the scope,
+   so nothing in the data can shadow them. */
 function proxy(obj) {
 	return new Proxy(obj, {
-		has: (t, k) => typeof k === 'string' && (k in t || !(k.startsWith('__') || k in globalThis)),
+		has: (t, k) => typeof k === 'string' && !k.startsWith('__') && (k in t || !(k in globalThis)),
 		get: (t, k) => (k === Symbol.unscopables) ? undefined : t[k],
 		set: (t, k, v) => { t[k] = v; return true; }
 	});

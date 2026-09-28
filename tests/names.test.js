@@ -71,6 +71,14 @@ test('validateAlias: trims, collapses, limits, rejects control characters', () =
 	assert.equal(names.validateAlias('a\u0000b').ok, false, 'control characters are rejected');
 });
 
+test('aliasMap: sections past ALIAS_MAX are ignored', () => {
+	assert.equal(names.ALIAS_MAX, 512);
+	const many = [];
+	for (let i = 0; i < 600; i++)
+		many.push({ '.type': 'client', '.name': 'cfg' + i, mac: '02:00:5e:00:' + ('0' + (i >> 8).toString(16)).slice(-2) + ':' + ('0' + (i & 255).toString(16)).slice(-2), name: 'n' + i });
+	assert.equal(Object.keys(names.aliasMap(many)).length, 512);
+});
+
 test('aliasMap: client sections only, valid MAC and name, first wins', () => {
 	const m = names.aliasMap([
 		{ '.type': 'client', '.name': 'cfg1', mac: '00-00-5E-00-53-10', name: 'Desk', icon: 'desktop' },
@@ -91,6 +99,37 @@ test('mdnsMap: host -> address map', () => {
 	assert.equal(m['2001:db8::20'], 'kitchen-speaker');
 });
 
+test('mdnsMap: an address claimed by two different names is dropped, whatever the order', () => {
+	/* umdns returns hosts in name order; an attacker picks a name that sorts first */
+	const hosts = {
+		'Aaa-Attacker.local': { ipv4: '192.0.2.50' },
+		'victim-real.local': { ipv4: '192.0.2.50', ipv6: '2001:db8::50' },
+		'other.local': { ipv4: '192.0.2.51' }
+	};
+	const m = names.mdnsMap(hosts);
+	assert.equal(m['192.0.2.50'], undefined);
+	assert.equal(m['2001:db8::50'], 'victim-real', 'the uncontested address still counts');
+	assert.equal(m['192.0.2.51'], 'other');
+	/* a third claim does not bring the address back */
+	assert.equal(names.mdnsMap(Object.assign({ 'zzz.local': { ipv4: '192.0.2.50' } }, hosts))['192.0.2.50'], undefined);
+	/* the same name twice (IPv4 list) is not a conflict */
+	assert.equal(names.mdnsMap({ 'tv.local': { ipv4: [ '192.0.2.60', '192.0.2.60' ] } })['192.0.2.60'], 'tv');
+	assert.equal(Object.getPrototypeOf(names.mdnsMap({ '__proto__.local': { ipv4: '192.0.2.70' } })), null);
+});
+
+test('mdnsForStations: shared addresses and names that land on two stations name nobody', () => {
+	const map = { '192.0.2.10': 'phone', '192.0.2.11': 'phone', '192.0.2.12': 'tv', '192.0.2.13': 'shared', '192.0.2.14': 'laptop', '2001:db8::14': 'laptop' };
+	const out = names.mdnsForStations(map, [
+		{ mac: '00:00:5e:00:53:10', ips: [ '192.0.2.10' ] },
+		{ mac: '00:00:5e:00:53:11', ips: [ '192.0.2.11' ] },          /* same name, second station */
+		{ mac: '00:00:5e:00:53:12', ips: [ '192.0.2.12', '192.0.2.13' ] },
+		{ mac: '00:00:5e:00:53:13', ips: [ '192.0.2.13' ] },          /* address on two stations */
+		{ mac: '00:00:5e:00:53:14', ips: [ '192.0.2.14', '2001:db8::14' ] }
+	]);
+	assert.deepEqual(Object.assign({}, out), { '192.0.2.12': 'tv', '192.0.2.14': 'laptop', '2001:db8::14': 'laptop' });
+	assert.deepEqual(Object.assign({}, names.mdnsForStations(null, [])), {});
+});
+
 const ALL = {
 	mac: MAC,
 	alias: { name: 'My Laptop', icon: 'laptop' },
@@ -102,18 +141,20 @@ const ALL = {
 	vendor: 'Example Vendor'
 };
 
-test('resolve: fixed order alias > dns > mdns > dhcp > wps > vendor', () => {
+test('resolve: fixed order alias > dns > dhcp > mdns > wps > vendor', () => {
+	/* DHCP hints are keyed by the station's own MAC; mDNS answers come from
+	   anyone on the LAN, so they rank below */
 	const order = [];
 	const s = Object.assign({}, ALL);
-	const steps = [ [ 'alias', 'My Laptop' ], [ 'dns', 'laptop-dns' ], [ 'mdns', 'laptop-mdns' ], [ 'dhcp', 'laptop-dhcp' ], [ 'wps', 'Laptop WPS' ], [ 'vendor', 'Example Vendor device · …00:53:10' ], [ 'mac', 'Device · …00:53:10' ] ];
-	const drop = [ 'alias', 'rdns', 'mdns', 'hint', 'wps', 'vendor' ];
+	const steps = [ [ 'alias', 'My Laptop' ], [ 'dns', 'laptop-dns' ], [ 'dhcp', 'laptop-dhcp' ], [ 'mdns', 'laptop-mdns' ], [ 'wps', 'Laptop WPS' ], [ 'vendor', 'Example Vendor device · …00:53:10' ], [ 'mac', 'Device · …00:53:10' ] ];
+	const drop = [ 'alias', 'rdns', 'hint', 'mdns', 'wps', 'vendor' ];
 	for (let i = 0; i < steps.length; i++) {
 		const r = names.resolve(s);
 		assert.deepEqual([ r.source, r.name ], steps[i]);
 		order.push(r.source);
 		if (drop[i]) delete s[drop[i]];
 	}
-	assert.deepEqual(order, [ 'alias', 'dns', 'mdns', 'dhcp', 'wps', 'vendor', 'mac' ]);
+	assert.deepEqual(order, [ 'alias', 'dns', 'dhcp', 'mdns', 'wps', 'vendor', 'mac' ]);
 });
 
 test('resolve: private MAC says so instead of a vendor, never "?"', () => {

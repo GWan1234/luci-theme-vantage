@@ -224,3 +224,28 @@ function badBypass(el, c, x, doc) {
 	new Worker(x); // expect-violation
 	doc.execCommand('insertHTML', false, x); // expect-violation
 }
+
+/* CSS, selectors, regular expressions and history URLs from data */
+function badCss(el, x, sheet, doc) {
+	el.style.cssText = x; // expect-violation
+	el.style.color = x; // expect-violation
+	el.style.backgroundImage = 'url(' + x + ')'; // expect-violation
+	el.style = x; // expect-violation
+	el.style[x] = x.v; // expect-violation
+	el.style.setProperty('background', 'url(' + x + ')'); // expect-violation
+	el.style.setProperty(x, '1px'); // expect-violation
+	Object.assign(el.style, { color: x }); // expect-violation
+	Object.assign(el.style, x); // expect-violation
+	new CSSStyleSheet().replaceSync(x); // expect-violation
+	sheet.insertRule(x); // expect-violation
+	fetch(x).then(function(t) { sheet.replaceSync(t); }); // expect-violation
+	fetch(L.resource('a.css')).then(function(t) { t = x; sheet.replaceSync(t); }); // expect-violation
+	doc.querySelector('[data-mac="' + x + '"]'); // expect-violation
+	el.closest(x); // expect-violation
+	el.matches(x.sel); // expect-violation
+	document.querySelectorAll(`[id=${x}]`); // expect-violation
+	new RegExp(x); // expect-violation
+	RegExp('^' + x + '$'); // expect-violation
+	history.pushState(null, '', x); // expect-violation
+	history.replaceState(null, '', 'javascript:' + x); // expect-violation
+}
