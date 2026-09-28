@@ -85,9 +85,21 @@ without the app.
 ## Install
 
 For OpenWrt 25.12 (apk). Both packages are architecture-independent, so
-the same files install on any target. Get them from a
-[release](https://github.com/anothaDev/luci-theme-vantage/releases) or
-[build them](#build), then, with the files in the current directory
+the same files install on any target.
+
+From the signed repository, on the router (once; later versions come with
+`apk upgrade`):
+
+```sh
+wget -O /etc/apk/keys/vantage-signing.pem https://anothadev.github.io/luci-theme-vantage/vantage-signing.pem
+sha256sum /etc/apk/keys/vantage-signing.pem   # must be c8a6c83eeb49ca2407932fb5e95785776128cef87db75ebaea0fe4171eee2157
+echo 'https://anothadev.github.io/luci-theme-vantage/25.12/packages.adb' >> /etc/apk/repositories.d/customfeeds.list
+apk update && apk add luci-theme-vantage luci-app-vantage
+```
+
+Or from the files of a
+[release](https://github.com/anothaDev/luci-theme-vantage/releases) (or
+[your own build](#build)), with the files in the current directory
 (`192.0.2.1` stands for your router's address):
 
 ```sh
@@ -206,6 +218,9 @@ screenshots taken with the replay's `--demo` mode or with personal data
 removed: no real IP addresses, MACs or SSIDs. Report security problems
 privately as described in [`SECURITY.md`](SECURITY.md), not in a public
 issue.
+
+Planned work and ideas are in [`docs/ROADMAP.md`](docs/ROADMAP.md); next
+up is searching clients, radios and networks with <kbd>Ctrl</kbd>+<kbd>K</kbd>.
 
 ## License
 

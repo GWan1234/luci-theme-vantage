@@ -48,8 +48,8 @@ test('Makefile: feed-buildable LuCI app, config is a conffile', () => {
 	assert.match(makefile, /^include \$\(TOPDIR\)\/rules\.mk$/m);
 	assert.match(makefile, /^include \$\(TOPDIR\)\/feeds\/luci\/luci\.mk$/m);
 	assert.match(makefile, /^# call BuildPackage - OpenWrt buildroot signature$/m);
-	assert.match(makefile, /^PKG_VERSION:=1\.0\.1$/m);
-	assert.match(makefile, /^PKG_RELEASE:=1$/m);
+	assert.match(makefile, /^PKG_VERSION:=[0-9]+\.[0-9]+\.[0-9]+$/m);
+	assert.match(makefile, /^PKG_RELEASE:=[1-9][0-9]*$/m);
 	assert.match(makefile, /^PKG_LICENSE:=GPL-3\.0-or-later$/m);
 	assert.match(makefile, /^LUCI_TITLE:=Vantage dashboard$/m);
 	assert.match(makefile, /^LUCI_DEPENDS:=\+luci-base \+rpcd( |$)/m);

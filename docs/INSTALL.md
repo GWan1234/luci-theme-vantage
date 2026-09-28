@@ -9,7 +9,21 @@ documentation address range; replace it with your router's LAN address.
 
 ## Quick install
 
-On OpenWrt 25.12, with the two `.apk` files and `SHA256SUMS` from a
+**From the signed repository** (recommended). On the router, over SSH,
+once:
+
+```sh
+wget -O /etc/apk/keys/vantage-signing.pem https://anothadev.github.io/luci-theme-vantage/vantage-signing.pem
+sha256sum /etc/apk/keys/vantage-signing.pem   # must be c8a6c83eeb49ca2407932fb5e95785776128cef87db75ebaea0fe4171eee2157
+echo 'https://anothadev.github.io/luci-theme-vantage/25.12/packages.adb' >> /etc/apk/repositories.d/customfeeds.list
+apk update && apk add luci-theme-vantage luci-app-vantage
+```
+
+If the fingerprint differs, stop and delete the key file. Later versions
+install with `apk update && apk upgrade`. See
+[Signed repository](#signed-repository).
+
+**From files**, on OpenWrt 25.12, with the two `.apk` files and `SHA256SUMS` from a
 [release](#from-a-github-release) (or your [own build](#build-from-source))
 in the current directory on your computer:
 
@@ -117,6 +131,44 @@ PowerShell prints the hash to compare by hand.
 catches damaged or incomplete downloads, not a tampered release. For an
 independent check, rebuild the release yourself and compare hashes
 ([below](#verify-a-release-by-rebuilding-it)).
+
+### Signed repository
+
+Every release is also published as an apk repository at
+`https://anothadev.github.io/luci-theme-vantage/25.12/`, with its index
+(`packages.adb`) signed by the project key. apk checks the signature
+against the keys in `/etc/apk/keys/` and each package against the hash in
+the index, so `--allow-untrusted` is not needed.
+
+The project's public key is `keys/vantage-signing.pem` in this repository
+and on the repository site. Its SHA-256 (of the PEM file) is:
+
+    c8a6c83eeb49ca2407932fb5e95785776128cef87db75ebaea0fe4171eee2157
+
+Set it up once on the router:
+
+```sh
+wget -O /etc/apk/keys/vantage-signing.pem https://anothadev.github.io/luci-theme-vantage/vantage-signing.pem
+sha256sum /etc/apk/keys/vantage-signing.pem   # must be c8a6c83eeb49ca2407932fb5e95785776128cef87db75ebaea0fe4171eee2157
+echo 'https://anothadev.github.io/luci-theme-vantage/25.12/packages.adb' >> /etc/apk/repositories.d/customfeeds.list
+apk update && apk add luci-theme-vantage luci-app-vantage
+```
+
+Upgrades then come with the rest of your packages:
+
+```sh
+apk update && apk upgrade luci-theme-vantage luci-app-vantage
+```
+
+To stop trusting the project, delete the key and the repository line:
+`rm /etc/apk/keys/vantage-signing.pem`, then remove the line from
+`/etc/apk/repositories.d/customfeeds.list`. Installed packages stay.
+
+The repository holds the latest release only; to install an older version,
+use its files from the release page. The key is used by CI on tagged
+releases; if it ever has to be replaced, the new fingerprint will be
+announced in a release and in this guide, and you would install the new
+key the same way.
 
 ### Build from source
 
@@ -434,7 +486,13 @@ Reload the page afterwards. No service needs a restart.
 
 ### Upgrade Vantage
 
-Get the newer files, check their hashes as above, copy them to `/tmp`, then:
+With the [signed repository](#signed-repository):
+
+```sh
+apk update && apk upgrade luci-theme-vantage luci-app-vantage
+```
+
+With files: get the newer ones, check their hashes as above, copy them to `/tmp`, then:
 
 ```sh
 apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk
@@ -698,6 +756,9 @@ Then reload the page. To remove Vantage entirely, see
   build on every page and, on "not found" pages, the tree of installed
   menu entries. That comes from LuCI's core templates, happens with every
   theme, and cannot be changed by a theme.
+- **Signed repository.** The [signed repository](#signed-repository) is
+  the safest route: apk verifies the index signature and every package
+  hash itself. Check the key fingerprint before trusting the key.
 - **Unsigned packages.** Installing with `--allow-untrusted` means apk
   doesn't check who made the files. Check the SHA-256 hashes every time,
   keep `--no-network` on that command so nothing else is installed

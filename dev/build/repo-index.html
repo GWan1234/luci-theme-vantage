@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Vantage apk repository</title>
+<style>
+body { font: 15px/1.55 system-ui, sans-serif; max-width: 46rem; margin: 3rem auto; padding: 0 1rem; color: #e8eaed; background: #0d0e10; }
+a { color: #c8f031; } code, pre { font-family: ui-monospace, monospace; }
+pre { background: #15171a; border: 1px solid #262a2f; border-radius: 8px; padding: 1rem; overflow-x: auto; }
+</style>
+</head>
+<body>
+<h1>Vantage apk repository</h1>
+<p>Signed package repository for <a href="https://github.com/anothaDev/luci-theme-vantage">Vantage</a>,
+a LuCI theme and dashboard for OpenWrt 25.12.</p>
+<p>One-time setup on the router, then install and upgrade with <code>apk</code>:</p>
+<pre>wget -O /etc/apk/keys/vantage-signing.pem https://anothadev.github.io/luci-theme-vantage/vantage-signing.pem
+sha256sum /etc/apk/keys/vantage-signing.pem
+# must print c8a6c83eeb49ca2407932fb5e95785776128cef87db75ebaea0fe4171eee2157
+echo 'https://anothadev.github.io/luci-theme-vantage/25.12/packages.adb' &gt;&gt; /etc/apk/repositories.d/customfeeds.list
+apk update
+apk add luci-theme-vantage luci-app-vantage</pre>
+<p>Compare the key fingerprint with the one in the project's
+<a href="https://github.com/anothaDev/luci-theme-vantage/blob/main/docs/INSTALL.md">install guide</a> before trusting it.</p>
+</body>
+</html>
