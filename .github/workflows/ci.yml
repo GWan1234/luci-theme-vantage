@@ -1,0 +1,157 @@
+name: CI
+
+# Tests and security checks on every push and pull request; packages built
+# with the pinned OpenWrt SDK; releases published from v* tags only when the
+# CI build matches the hashes committed in .release-manifests/<tag>.sha256.
+#
+# Every action is pinned to a full commit SHA. Nothing here has access to
+# secrets except the release job's GITHUB_TOKEN (contents: write).
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  # ucode as pinned by OpenWrt 25.12 (package/utils/ucode PKG_SOURCE_VERSION)
+  UCODE_REPO: https://github.com/jow-/ucode.git
+  UCODE_REV: 85922056ef7abeace3cca3ab28bc1ac2d88e31b1
+  SDK_RELEASE: 25.12.4
+
+jobs:
+  checks:
+    name: Tests and security checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Build ucode (for the rpcd plugin tests)
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake libjson-c-dev
+          git init -q "$RUNNER_TEMP/ucode-src"
+          git -C "$RUNNER_TEMP/ucode-src" fetch -q --depth 1 "$UCODE_REPO" "$UCODE_REV"
+          git -C "$RUNNER_TEMP/ucode-src" checkout -q FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/ucode-src" rev-parse HEAD)" = "$UCODE_REV"
+          cmake -S "$RUNNER_TEMP/ucode-src" -B "$RUNNER_TEMP/ucode-build" \
+            -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$RUNNER_TEMP/ucode" \
+            -DCMAKE_C_FLAGS=-Wno-error=discarded-qualifiers \
+            -DUBUS_SUPPORT=OFF -DUCI_SUPPORT=OFF -DULOOP_SUPPORT=OFF -DRTNL_SUPPORT=OFF \
+            -DNL80211_SUPPORT=OFF -DRESOLV_SUPPORT=OFF -DDIGEST_SUPPORT=OFF \
+            -DLOG_SUPPORT=OFF -DSOCKET_SUPPORT=OFF -DZLIB_SUPPORT=OFF
+          cmake --build "$RUNNER_TEMP/ucode-build" -j"$(nproc)"
+          cmake --install "$RUNNER_TEMP/ucode-build"
+          echo "UCODE=$RUNNER_TEMP/ucode/bin/ucode" >> "$GITHUB_ENV"
+          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/ucode/lib" >> "$GITHUB_ENV"
+
+      - name: Unit tests
+        run: node --test tests/
+
+      - name: DOM sink check
+        run: node security-tests/check_dom_sinks.js
+
+      - name: Template security test
+        run: node security-tests/test_templates.js
+
+      - name: ACL policy test
+        run: node security-tests/test_acl_policy.js
+
+      - name: Private address check
+        run: node security-tests/check_private_addresses.js
+
+  build:
+    name: Build packages (OpenWrt 25.12.4)
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '24'
+
+      - name: Build with the pinned SDK (verifies every package)
+        run: |
+          podman --version
+          dev/build/sdk-build.sh "$SDK_RELEASE" HEAD
+
+      - name: Check against the committed release manifest
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          manifest=".release-manifests/${TAG}.sha256"
+          test -f "$manifest" || { echo "::error::missing $manifest"; exit 1; }
+          diff <(sort "$manifest") <(sort "dist/$SDK_RELEASE/SHA256SUMS") || {
+            echo "::error::CI build does not match $manifest"; exit 1; }
+
+      - name: Upload packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: vantage-${{ env.SDK_RELEASE }}
+          path: |
+            dist/${{ env.SDK_RELEASE }}/*.apk
+            dist/${{ env.SDK_RELEASE }}/SHA256SUMS
+            dist/${{ env.SDK_RELEASE }}/BUILDINFO
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: vantage-${{ env.SDK_RELEASE }}
+          path: release
+
+      - name: Create or complete the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          cd release
+          sha256sum -c SHA256SUMS
+          if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
+            # never replace assets of an existing release
+            for f in *.apk SHA256SUMS BUILDINFO; do
+              gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name' | grep -qx "$f" \
+                || gh release upload "$TAG" "$f" --repo "$REPO"
+            done
+          else
+            gh release create "$TAG" --repo "$REPO" --verify-tag --title "Vantage ${TAG#v}" \
+              --notes "Packages for OpenWrt ${SDK_RELEASE} (apk), built by CI from ${GITHUB_SHA}. See SHA256SUMS, BUILDINFO and docs/INSTALL.md." \
+              *.apk SHA256SUMS BUILDINFO
+          fi

@@ -111,6 +111,20 @@ dev/build/sdk-build.sh 25.12.4
 - One topic per pull request. Mention anything that changes the ACL,
   the templates or the install scripts.
 
+CI (`.github/workflows/ci.yml`) runs the tests and security checks on
+every push and pull request, then builds the packages with the pinned
+SDK.
+
+## Releases
+
+1. Bump `PKG_VERSION` in both Makefiles and commit.
+2. Build that commit locally: `dev/build/sdk-build.sh 25.12.4`.
+3. Commit `dist/25.12.4/SHA256SUMS` as `.release-manifests/v<version>.sha256`,
+   push, then push the tag `v<version>` on that commit.
+4. CI rebuilds the tag, refuses to publish unless its hashes match the
+   committed manifest, and creates the GitHub release with the packages,
+   `SHA256SUMS` and `BUILDINFO`.
+
 By contributing you agree that your contribution is licensed under the
 GNU General Public License, version 3 or any later version
 (GPL-3.0-or-later), like the rest of the project.
