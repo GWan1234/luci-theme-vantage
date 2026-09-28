@@ -63,9 +63,9 @@ if (opts.help || opts.bad || !opts.mirror) {
 const port = parseInt(opts.port, 10);
 if (!(port > 0 && port < 65536)) { console.error('bad --port'); process.exit(2); }
 
-/* device rootfs dump: --rootfs, $VANTAGE_ROOTFS, or the sibling firmware tree */
+/* device rootfs dump: --rootfs, $VANTAGE_ROOTFS, or ../vantage-rootfs next to the repository */
 const rootfs = path.resolve(opts.rootfs || process.env.VANTAGE_ROOTFS ||
-	path.join(__dirname, '../../../zyxel-nwa50be-openwrt/work/flash-20260919.rO8sRE/packaged-rootfs'));
+	path.join(__dirname, '../../../vantage-rootfs'));
 const coreTemplates = path.join(rootfs, 'usr/share/ucode/luci/template');
 if (!fs.existsSync(path.join(coreTemplates, 'view.ut'))) {
 	console.error(`no LuCI templates under ${coreTemplates}; pass --rootfs <device rootfs dump>`);

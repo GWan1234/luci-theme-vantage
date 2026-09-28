@@ -60,8 +60,9 @@ Inputs:
 
 - `--mirror`: output of `dev/mirror/record-browser.js` / `record-ssh.js`.
   All `browser-*` and `ssh-*` directories are merged, newer wins.
-- `--rootfs` (or `$VANTAGE_ROOTFS`, default: the flash dump in the sibling
-  `zyxel-nwa50be-openwrt/work` tree): core templates
+- `--rootfs` (or `$VANTAGE_ROOTFS`, default: `../vantage-rootfs` next to
+  the repository; a directory or symlink holding an unpacked OpenWrt 25.12
+  root filesystem with LuCI installed): core templates
   (`usr/share/ucode/luci/template`), `www/luci-static` (bootstrap, views),
   `usr/share/luci/menu.d`, `etc/os-release`.
 - `--theme-dir`: a theme's `htdocs/luci-static/<name>`. Served first under

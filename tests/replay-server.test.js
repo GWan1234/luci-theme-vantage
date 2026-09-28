@@ -16,7 +16,7 @@ const path = require('path');
 
 const ROOT = path.join(__dirname, '..');
 const MIRROR = process.env.VANTAGE_MIRROR || path.join(ROOT, '..', 'vantage-mirror');
-const ROOTFS = process.env.VANTAGE_ROOTFS || path.join(ROOT, '../zyxel-nwa50be-openwrt/work/flash-20260919.rO8sRE/packaged-rootfs');
+const ROOTFS = process.env.VANTAGE_ROOTFS || path.join(ROOT, '../vantage-rootfs');
 const ready = fs.existsSync(MIRROR) && fs.existsSync(path.join(ROOTFS, 'usr/share/ucode/luci/template/view.ut'));
 const skip = !ready && 'no mirror or rootfs dump';
 

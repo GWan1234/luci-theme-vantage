@@ -18,9 +18,8 @@ Please report security problems **privately**, not in a public issue:
 2. Choose **Report a vulnerability**. This uses GitHub's private
    vulnerability reporting, so only the maintainers see your report.
 
-The repository may not be public yet; this route works once it is. If the
-button is missing, open an issue that asks for a private contact, without
-any details of the problem.
+If the button is missing, open an issue that asks for a private contact,
+without any details of the problem.
 
 Please include:
 

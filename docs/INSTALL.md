@@ -98,8 +98,8 @@ works under any LuCI theme.
 Releases are published at
 <https://github.com/anothaDev/luci-theme-vantage/releases>.
 
-> **Note:** at the time of writing, the repository and its releases may not be public
-> yet. If the page above doesn't load, [build from source](#build-from-source).
+> **Note:** if the release you want has no packages attached,
+> [build from source](#build-from-source).
 
 Each release carries the two `.apk` files and a `SHA256SUMS` file listing
 their SHA-256 hashes. Download all three from the release page, then check
@@ -524,9 +524,8 @@ CONFIG_PACKAGE_luci-app-vantage=y
 The packages need the `luci` feed (the default feeds include it).
 
 To pin a release, append `;<tag>` to the URL
-(`https://github.com/anothaDev/luci-theme-vantage.git;<tag>`). While the
-repository is private, `src-git` needs credentials; use a local clone
-instead:
+(`https://github.com/anothaDev/luci-theme-vantage.git;<tag>`). To build
+from a local checkout instead:
 
 ```sh
 echo 'src-link vantage /path/to/luci-theme-vantage' >> feeds.conf

@@ -342,7 +342,7 @@ function attrOf(html, tag, name) {
 
 /* A device rootfs dump provides LuCI's own templates (as for the replay). */
 const ROOTFS = process.env.VANTAGE_ROOTFS ||
-	path.join(__dirname, '../../zyxel-nwa50be-openwrt/work/flash-20260919.rO8sRE/packaged-rootfs');
+	path.join(__dirname, '../../vantage-rootfs');
 const CORE = path.join(ROOTFS, 'usr/share/ucode/luci/template');
 const HAVE_CORE = fs.existsSync(path.join(CORE, 'error404.ut')) && fs.existsSync(path.join(CORE, 'header.ut'));
 const NO_CORE = HAVE_CORE ? false : 'no LuCI core templates (set VANTAGE_ROOTFS to a device rootfs dump)';
