@@ -1,4 +1,5 @@
 'use strict';
+const mkTmp = require('./tmpdir');
 /* luci-app-vantage's rpcd ucode plugin (root/usr/share/rpcd/ucode/luci.vantage)
    and its replay stand-in (dev/replay/vantage-plugin.js).
 
@@ -39,7 +40,7 @@ const NO_UCODE = UCODE ? false : 'no ucode binary (set UCODE=/path/to/ucode, e.g
 
 /* run cases through the real plugin: [ { status, reply, sections } ] */
 function runUcode(cases) {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-plugin-'));
+	const dir = mkTmp('vantage-plugin-');
 	const file = path.join(dir, 'cases.json');
 	try {
 		fs.writeFileSync(file, JSON.stringify(cases));

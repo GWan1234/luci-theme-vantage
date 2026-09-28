@@ -1,4 +1,5 @@
 'use strict';
+const mkTmp = require('./tmpdir');
 /* security-tests/verify_built_apk.js: its rules on a synthetic package, and
    a full check of dist/<release>/ when a build is there (skipped otherwise;
    dist/ is not committed). */
@@ -45,7 +46,7 @@ const SRC = {
 	'root/etc/config/vantage': [ 'config names names\n', 0o644 ],
 };
 
-function tmp() { return fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-pkgtest-')); }
+function tmp() { return mkTmp('vantage-pkgtest-'); }
 
 /* a source tree and the package that a correct build makes from it */
 function fixture() {

@@ -1,4 +1,5 @@
 'use strict';
+const mkTmp = require('./tmpdir');
 /* dev/replay/demo.js: the replay's --demo pseudonymiser.
 
    Unit tests use inputs built from numbers (this tree must stay free of
@@ -156,7 +157,7 @@ function leaks(text, p) {
 test('demo: canary mirror - free text, log names, MAC fragments, EUI-64, DUIDs, serials', () => {
 	const { Store } = require('../dev/replay/store');
 	const os = require('os');
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-demo-canary-'));
+	const dir = mkTmp('vantage-demo-canary-');
 	const run = path.join(dir, 'browser-2026-01-01T00-00-00-000Z');
 	fs.mkdirSync(run);
 	const CLIENT = mac(0xa4, 0x5e, 0x60, 0x11, 0x22, 0x33);        /* only named in a DHCP log line */

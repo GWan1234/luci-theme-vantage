@@ -1,4 +1,5 @@
 'use strict';
+const mkTmp = require('./tmpdir');
 /* dev/mirror/record-browser.js end to end, against a local mock device in
    headless Chromium: requests from a second tab, a popup, a dedicated
    worker and a service worker are refused like the first tab's; the device
@@ -130,7 +131,7 @@ async function waitFor(fn, ms, what) {
 const post = (url, body, type) => `fetch(${JSON.stringify(url)}, { method: 'POST', headers: { 'Content-Type': ${JSON.stringify(type || 'application/json')} }, body: ${JSON.stringify(body)} }).then(r => 'status ' + r.status, () => 'blocked')`;
 
 test('recorder: every tab, popup and worker is filtered; canonical bodies; profile removed', { skip, timeout: 90000 }, async () => {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-rec-test-'));
+	const tmp = mkTmp('vantage-rec-test-');
 	const port = await freePort();
 	const { server, seen } = mockDevice(null);
 	await new Promise(r => server.listen(port, '127.0.0.1', r));
@@ -206,7 +207,7 @@ test('recorder: every tab, popup and worker is filtered; canonical bodies; profi
 });
 
 test('recorder: SIGTERM kills the browser and removes the profile', { skip, timeout: 60000 }, async () => {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-rec-test-'));
+	const tmp = mkTmp('vantage-rec-test-');
 	const port = await freePort();
 	const { server, seen } = mockDevice(null);
 	await new Promise(r => server.listen(port, '127.0.0.1', r));
@@ -231,7 +232,7 @@ test('recorder: SIGTERM kills the browser and removes the profile', { skip, time
 });
 
 test('recorder: https needs a pin, and only the pinned key is accepted', { skip: skip || (!which('openssl') && 'no openssl'), timeout: 90000 }, async () => {
-	const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-rec-test-'));
+	const tmp = mkTmp('vantage-rec-test-');
 	const key = path.join(tmp, 'k.pem'), crt = path.join(tmp, 'c.pem');
 	execFileSync('openssl', [ 'req', '-x509', '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:P-256', '-nodes', '-keyout', key, '-out', crt,
 		'-days', '1', '-subj', '/CN=127.0.0.1', '-addext', 'subjectAltName=IP:127.0.0.1' ], { stdio: 'ignore' });

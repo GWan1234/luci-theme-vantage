@@ -1,4 +1,5 @@
 'use strict';
+const mkTmp = require('./tmpdir');
 /* dev/replay/store.js: the uci overlay cannot reach Object.prototype and
    refuses names libuci refuses; plugins answer their objects; log text is
    kept free of control characters. Uses a small synthetic mirror. */
@@ -10,7 +11,7 @@ const path = require('path');
 const { Store, safe } = require('../dev/replay/store');
 
 function mirror() {
-	const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vantage-store-test-'));
+	const dir = mkTmp('vantage-store-test-');
 	fs.mkdirSync(path.join(dir, 'browser-2026-01-01T00-00-00-000Z'));
 	const rows = [
 		{ at: 1, object: 'uci', method: 'get', args: { config: 'network' }, result: [ 0, { values: {
