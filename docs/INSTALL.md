@@ -28,7 +28,7 @@ install with `apk update && apk upgrade`. See
 in the current directory on your computer:
 
 ```sh
-sha256sum -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 scp -O luci-theme-vantage-*.apk luci-app-vantage-*.apk root@192.0.2.1:/tmp/
 ssh root@192.0.2.1 'apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
 ssh root@192.0.2.1 'rm -f /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
@@ -46,6 +46,7 @@ page you see after login. Every step is explained below.
 - [Install on the router](#install-on-the-router)
 - [What the install changes](#what-the-install-changes)
 - [Switch themes](#switch-themes)
+- [Languages](#languages)
 - [Upgrade, downgrade, uninstall](#upgrade-downgrade-uninstall)
 - [Build it into your firmware](#build-it-into-your-firmware)
 - [Troubleshooting](#troubleshooting)
@@ -105,7 +106,8 @@ fonts, scripts or CDNs are loaded, so the UI works without internet access.
 You need three files: `luci-theme-vantage-<version>.apk`,
 `luci-app-vantage-<version>.apk` and `SHA256SUMS`. Install either package
 on its own or both together; the theme doesn't need the app, and the app
-works under any LuCI theme.
+works under any LuCI theme. For a translation, add its language packages
+(see [Languages](#languages)).
 
 ### From a GitHub release
 
@@ -115,16 +117,19 @@ Releases are published at
 > **Note:** if the release you want has no packages attached,
 > [build from source](#build-from-source).
 
-Each release carries the two `.apk` files and a `SHA256SUMS` file listing
-their SHA-256 hashes. Download all three from the release page, then check
-them on your computer:
+Each release carries the two `.apk` files, the language packages of every
+translation it has (`luci-i18n-vantage-*.apk`, see [Languages](#languages))
+and a `SHA256SUMS` file listing their SHA-256 hashes. Download the packages
+you want and `SHA256SUMS` from the release page, then check them on your
+computer:
 
 ```sh
-sha256sum -c SHA256SUMS            # Linux
-shasum -a 256 -c SHA256SUMS        # macOS
+sha256sum -c --ignore-missing SHA256SUMS            # Linux
+grep luci-theme-vantage SHA256SUMS | shasum -a 256 -c    # macOS, per file
 ```
 
-Both files must report `OK`. On Windows, `Get-FileHash <file>` in
+Every file must report `OK`. (`--ignore-missing` skips listed files you did
+not download; with macOS's `shasum`, check each file as shown.) On Windows, `Get-FileHash <file>` in
 PowerShell prints the hash to compare by hand.
 
 `SHA256SUMS` comes from the same place as the packages, so this check
@@ -180,8 +185,9 @@ key the same way.
 
 ### Build from source
 
-`dev/build/sdk-build.sh` builds both packages inside the official OpenWrt
-SDK container image.
+`dev/build/sdk-build.sh` builds both packages, and a language package for
+each translation in the tree, inside the official OpenWrt SDK container
+image.
 
 You need:
 
@@ -231,27 +237,31 @@ The container runs without capabilities (`--cap-drop=all`,
 to a fresh output directory. It keeps network access, which the feed clone
 needs.
 
-Before anything is written to `dist/<release>/`, the script checks both
-packages with `security-tests/verify_built_apk.js`, using the SDK's own
-`apk` and `jsmin`: the file list, modes and owners, metadata and
+Before anything is written to `dist/<release>/`, the script checks every
+package with `security-tests/verify_built_apk.js`, using the SDK's own
+`apk`, `jsmin` and `po2lmo`: the file list, modes and owners, metadata and
 dependencies, install and remove scripts, and that every packaged file is
 the commit's source after LuCI's build transforms (JavaScript minification,
-`?v=<version>` in templates). Then it replaces the previous contents of
-`dist/<release>/` (only its own file names) with:
+`?v=<version>` in templates, catalogues compiled by `po2lmo`). The set of
+packages must be exactly the two plus one language package per
+`po/<lang>/` directory of each, named the way the SDK's `luci.mk` names
+them. Then it replaces the previous contents of `dist/<release>/` (only its
+own file names) with:
 
 | File | Contents |
 |---|---|
 | `luci-theme-vantage-<version>.apk`, `luci-app-vantage-<version>.apk` | the packages |
+| `luci-i18n-vantage-<lang>-<version>.apk`, `luci-i18n-vantage-theme-<lang>-<version>.apk` | language packages, one pair per translation (none without translations) |
 | `SHA256SUMS` | their SHA-256 hashes |
 | `BUILDINFO` | commit, SDK release, image digest, SDK tarball hash, entrypoint hash, feed commits |
 | `packages.adb` | only with signing, see [Signed packages](#signed-packages) |
 
-The script exits 0 only when both packages were built, verified and
+The script exits 0 only when all packages were built, verified and
 hashed. After a successful build it deletes its work directory; after a
 failure it keeps it (`vantage-build.XXXXXX` under `$TMPDIR`, or `/tmp`) and
 prints its path, with the full `build.log`. Delete it once you no longer
-need the log. It also leaves the SDK's `apk` and `jsmin` in `dist/.tools/`
-so the packages can be re-checked later:
+need the log. It also leaves the SDK's `apk`, `jsmin`, `po2lmo` and
+`luci.mk` in `dist/.tools/` so the packages can be re-checked later:
 
 ```sh
 node security-tests/verify_built_apk.js dist/25.12.4
@@ -387,11 +397,12 @@ cd /tmp
 sha256sum -c SHA256SUMS
 ```
 
-When you copied only one of the packages, check just that one (`sha256sum
--c` fails for files that are listed but missing):
+When you copied only some of the packages listed (one of the two, or no
+language packages), check just those (`sha256sum -c` fails for files that
+are listed but missing):
 
 ```sh
-grep luci-theme-vantage SHA256SUMS | sha256sum -c
+grep -E 'luci-(theme|app)-vantage-' SHA256SUMS | sha256sum -c
 ```
 
 Continue only when every file says `OK`.
@@ -490,6 +501,53 @@ uci commit luci
 
 Reload the page afterwards. No service needs a restart.
 
+## Languages
+
+Vantage's texts go through LuCI's translation system. A translation ships
+as up to two small packages per language, one for each Vantage package:
+
+| Package | Translates |
+|---|---|
+| `luci-i18n-vantage-<lang>` | the dashboard (`luci-app-vantage`) |
+| `luci-i18n-vantage-theme-<lang>` | the theme (`luci-theme-vantage`) |
+
+`<lang>` is LuCI's language suffix, the same as in OpenWrt's own
+`luci-i18n-base-<lang>`: for example `de`, `fr`, `pt-br`, or `zh-cn` for
+Simplified Chinese. Each language package depends on its Vantage package
+and has the same version. The [README](../README.md#languages) lists the
+translations that exist; a release carries the language packages of all
+of them.
+
+From the [signed repository](#signed-repository):
+
+```sh
+apk update && apk add luci-i18n-vantage-zh-cn luci-i18n-vantage-theme-zh-cn
+```
+
+From release files: the language packages are assets of the release, next
+to the two packages and listed in the same `SHA256SUMS`. Check, copy and
+install them like the others, for example:
+
+```sh
+apk add --no-network --allow-untrusted /tmp/luci-i18n-vantage-zh-cn-*.apk /tmp/luci-i18n-vantage-theme-zh-cn-*.apk
+```
+
+For LuCI's own pages in the same language, install OpenWrt's
+`luci-i18n-base-<lang>` too (`apk add luci-i18n-base-zh-cn`).
+
+Then choose the language in LuCI: **System → System → Language and Style
+→ Language**, then **Save & Apply**. `auto` follows the browser's
+language. Installing a language package adds its language to that list.
+
+A language package contains only the compiled catalogue
+(`/usr/lib/lua/luci/i18n/vantage.<lang>.lmo` or
+`vantage-theme.<lang>.lmo`) and a first-boot script that registers the
+language (`luci.languages.<lang>`). Texts that are not translated yet stay
+in English. `apk upgrade` upgrades installed language packages with the
+rest; with files, install the new language packages together with the new
+packages. To remove a translation, `apk del` its packages; when you
+uninstall Vantage, name its language packages too.
+
 ## Upgrade, downgrade, uninstall
 
 ### Upgrade Vantage
@@ -530,7 +588,9 @@ switches LuCI to Bootstrap, and the reinstall selects Vantage again.
 apk del luci-app-vantage luci-theme-vantage
 ```
 
-Or name just one of them. What happens:
+Or name just one of them, and add any installed language packages
+(`apk list --installed | grep vantage` shows them, e.g.
+`luci-i18n-vantage-zh-cn`). What happens:
 
 - **Theme:** if Vantage is the active theme, LuCI switches to Bootstrap (or,
   when Bootstrap isn't installed, to another installed theme), and the

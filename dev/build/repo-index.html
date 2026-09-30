@@ -21,6 +21,9 @@ sha256sum /etc/apk/keys/vantage-signing.pem
 echo 'https://anothadev.github.io/luci-theme-vantage/25.12/packages.adb' &gt;&gt; /etc/apk/repositories.d/customfeeds.list
 apk update
 apk add luci-theme-vantage luci-app-vantage</pre>
+<p>Translations, where available, are separate packages:
+<code>apk add luci-i18n-vantage-&lt;lang&gt; luci-i18n-vantage-theme-&lt;lang&gt;</code>
+(for example <code>zh-cn</code>); choose the language under System → System → Language and Style.</p>
 <p>Compare the key fingerprint with the one in the project's
 <a href="https://github.com/anothaDev/luci-theme-vantage/blob/main/docs/INSTALL.md">install guide</a> before trusting it.</p>
 </body>

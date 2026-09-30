@@ -103,7 +103,7 @@ Or from the files of a
 (`192.0.2.1` stands for your router's address):
 
 ```sh
-sha256sum -c SHA256SUMS
+sha256sum -c --ignore-missing SHA256SUMS
 scp -O luci-theme-vantage-*.apk luci-app-vantage-*.apk root@192.0.2.1:/tmp/
 ssh root@192.0.2.1 'apk add --no-network --allow-untrusted /tmp/luci-theme-vantage-*.apk /tmp/luci-app-vantage-*.apk'
 ```
@@ -168,6 +168,7 @@ Checks:
 
 ```sh
 node --test tests/
+dev/i18n/update.sh --check
 node security-tests/check_dom_sinks.js
 node security-tests/check_private_addresses.js [--require-mirror --mirror ../vantage-mirror]
 node security-tests/test_templates.js
@@ -208,6 +209,24 @@ node security-tests/test_acl_policy.js
 |---|---|
 | 25.12 | Built with the 25.12 SDK and tested |
 | 24.10 | Untested; LuCI contract differences are not verified |
+
+## Languages
+
+Vantage speaks English so far, and translations are very welcome.
+Simplified Chinese is in progress in
+[#1](https://github.com/anothaDev/luci-theme-vantage/pull/1), thanks to
+[@ntbowen](https://github.com/ntbowen).
+
+To add a language: fork the repository, run
+`dev/i18n/update.sh --add <lang>` (a LuCI language code such as `de` or
+`zh_Hans`), translate the two new `.po` files and open a pull request
+that touches only `po/` files. Preview your work in the replay with
+`--lang <lang>`. The details are under
+[Translations](CONTRIBUTING.md#translations).
+
+Each translation installs as its own packages, e.g.
+`apk add luci-i18n-vantage-de luci-i18n-vantage-theme-de`; see
+[Languages](docs/INSTALL.md#languages) in the install guide.
 
 ## Contributing
 

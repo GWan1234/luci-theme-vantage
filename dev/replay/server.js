@@ -10,6 +10,7 @@
    usage: node server.js --mirror <dir> [--port 8025] [--theme-dir <htdocs/luci-static/name>]
                          [--theme <name>] [--templates <ucode/template dir>] [--rootfs <dir>]
                          [--app-dir <package dir>]... [--keep-uniwrt] [--[no-]synthetic] [--demo]
+                         [--lang <LuCI language, e.g. de or zh_Hans>]
 
    Pages are rendered like the device does: the dispatcher logic below
    resolves the request against the recorded menu, then the core
@@ -18,6 +19,10 @@
 
    --demo pseudonymises the recording as it is loaded (demo.js): documentation
    MACs/addresses, neutral hostname/SSIDs/client names, for screenshots.
+
+   --lang previews a translation: the UI runs in that language with the
+   theme's and apps' po/<lang>/*.po (compiled the way po2lmo does, read on
+   every request) over the recorded catalogue of that language.
 
    Trust model: the templates (--templates, --theme-dir, the theme and app
    packages) and the --rootfs dump are executed as JavaScript with your
@@ -38,6 +43,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { Engine } = require('./ut');
 const { Store, safe } = require('./store');
+const i18n = require('../i18n/catalog');
 const policy = require('../mirror/policy');
 
 /* ------------------------------------------------------------ arguments */
@@ -45,7 +51,7 @@ const policy = require('../mirror/policy');
 function parseArgs(argv) {
 	const o = { port: 8025, synthetic: true };
 	for (let i = 0; i < argv.length; i++) {
-		const m = /^--(mirror|port|theme-dir|theme|templates|rootfs|app-dir)(?:=(.*))?$/.exec(argv[i]);
+		const m = /^--(mirror|port|theme-dir|theme|templates|rootfs|app-dir|lang)(?:=(.*))?$/.exec(argv[i]);
 		if (!m) { if (argv[i] === '--keep-uniwrt') o.keepUniwrt = true; else if (argv[i] === '--synthetic') o.synthetic = true; else if (argv[i] === '--no-synthetic') o.synthetic = false; else if (argv[i] === '--demo') o.demo = true; else if (argv[i] === '-h' || argv[i] === '--help') o.help = true; else o.bad = argv[i]; continue; }
 		const v = (m[2] !== undefined) ? m[2] : argv[++i];
 		if (m[1] === 'app-dir') (o.appDirs = o.appDirs || []).push(v);
@@ -54,12 +60,14 @@ function parseArgs(argv) {
 	return o;
 }
 
-const USAGE = 'usage: server.js --mirror <dir> [--port 8025] [--theme-dir <htdocs/luci-static/name>] [--theme <name>] [--templates <dir>] [--rootfs <dir>] [--app-dir <pkg>]... [--keep-uniwrt] [--no-synthetic] [--demo]';
+const USAGE = 'usage: server.js --mirror <dir> [--port 8025] [--theme-dir <htdocs/luci-static/name>] [--theme <name>] [--templates <dir>] [--rootfs <dir>] [--app-dir <pkg>]... [--keep-uniwrt] [--no-synthetic] [--demo] [--lang <lang>]';
 const opts = parseArgs(process.argv.slice(2));
 if (opts.help || opts.bad || !opts.mirror) {
 	console.error(opts.bad ? `unknown argument ${opts.bad}\n${USAGE}` : USAGE);
 	process.exit(2);
 }
+function readText(file) { try { return fs.readFileSync(file, 'utf8'); } catch (e) { return ''; } }
+
 const port = parseInt(opts.port, 10);
 if (!(port > 0 && port < 65536)) { console.error('bad --port'); process.exit(2); }
 
@@ -94,11 +102,22 @@ for (const d of appDirs) {
 	}
 }
 
+/* --lang: a LuCI language code (po/ directory name, e.g. zh_Hans) or its
+   package suffix (zh-cn); LuCI itself uses the suffix (luci.main.lang
+   zh_cn -> catalogue *.zh-cn.lmo, /admin/translations/zh-cn) */
+let preview = null;
+if (opts.lang != null) {
+	const langs = i18n.languages(readText(path.join(__dirname, '../i18n/luci-languages.mk')));
+	const hit = [ ...langs ].find(([ code, l ]) => code === opts.lang || l.lc === opts.lang);
+	if (!hit) { console.error(`--lang ${opts.lang}: not a LuCI language (see dev/i18n/luci-languages.mk)`); process.exit(2); }
+	/* the theme package is three levels above htdocs/luci-static/<name> */
+	const pkgs = [ themeDir && path.resolve(themeDir, '../../..'), ...appDirs ].filter(Boolean);
+	preview = { code: hit[0], lc: hit[1].lc, dirs: pkgs.map(d => path.join(d, 'po', hit[0])) };
+}
+
 const store = new Store(path.resolve(opts.mirror), { synthetic: opts.synthetic, demo: !!opts.demo });
 
 /* --------------------------------------------------------------- device */
-
-function readText(file) { try { return fs.readFileSync(file, 'utf8'); } catch (e) { return ''; } }
 
 const version = (() => {
 	const v = readText(path.join(rootfs, 'usr/share/ucode/luci/version.uc'));
@@ -229,7 +248,38 @@ const anonAcl = new Map();
 const anonAllowed = (o, m) => anonAcl.has(o) && (anonAcl.get(o).has(m) || anonAcl.get(o).has('*'));
 
 const luciMain = store.uciGet('luci', 'main') || {};
-const lang = (!luciMain.lang || luciMain.lang === 'auto') ? 'en' : String(luciMain.lang).replace('_', '-');
+const lang = preview ? preview.lc : (!luciMain.lang || luciMain.lang === 'auto') ? 'en' : String(luciMain.lang).replace('_', '-');
+
+/* the --lang catalogue: key hash -> text, the recorded one for the language
+   first, then every po/<lang>/*.po of the packages (theirs win, as the
+   later key in window.TR does); rebuilt per request so edits show on reload */
+function previewCatalogue() {
+	const cat = new Map(i18n.parseTranslationsJs(store.translations(preview.lc)));
+	for (const dir of preview.dirs) {
+		let files = [];
+		try { files = fs.readdirSync(dir).filter(f => f.endsWith('.po')).sort(); } catch (e) { continue; }
+		for (const f of files) {
+			let entries;
+			try { entries = i18n.lmoEntries(fs.readFileSync(path.join(dir, f), 'utf8')); }
+			catch (e) { console.error(`[replay] ${safe(path.join(dir, f))}: ${safe(e.message)}`); continue; }
+			/* po2lmo writes its index sorted by key */
+			for (const [ k, v ] of entries.sort((a, b) => a[0] - b[0])) { cat.delete(k); cat.set(k, v); }
+		}
+	}
+	return cat;
+}
+
+/* ucode's _() (dispatcher.uc: translate(...) ?? key): lmo.c
+   lmo_canon_hash() collapses ASCII whitespace and trims before hashing */
+const canon = s => s.replace(/[ \t\n\v\f\r]+/g, ' ').replace(/^ | $/g, '');
+function templateTranslate(cat) {
+	return (key, ctx) => {
+		if (typeof key !== 'string' || (ctx != null && typeof ctx !== 'string')) return key;
+		const k = (ctx != null ? canon(ctx) + '\u0001' : '') + canon(key);
+		const v = k ? cat.get(i18n.sfh(k)) : undefined;
+		return v === undefined ? key : v;
+	};
+}
 const startTime = Math.floor(Date.now() / 1000);
 
 /* fake session: any login is accepted */
@@ -370,7 +420,8 @@ function templateEnv(req, resolved, loggedIn, form) {
 		},
 		media: '/luci-static/' + theme, theme, resource: '/luci-static/resources',
 		pkgs_update_time: startTime, lua_active: false,
-		dispatched: resolved.node, requested: resolved.node
+		dispatched: resolved.node, requested: resolved.node,
+		...(preview ? { _: templateTranslate(previewCatalogue()) } : {})
 	};
 }
 
@@ -644,8 +695,11 @@ async function handle(req, res) {
 	const segs = p.slice(SCRIPT.length).split('/').filter(Boolean);
 	const sub = segs.join('/');
 	if (sub === 'admin/menu') return send(res, 200, 'application/json; charset=UTF-8', JSON.stringify(menu));
-	if (segs[0] === 'admin' && segs[1] === 'translations')
-		return send(res, 200, 'application/javascript; charset=UTF-8', store.translations(segs[2] || lang));
+	if (segs[0] === 'admin' && segs[1] === 'translations') {
+		const want = segs[2] || lang;
+		const body = (preview && want === preview.lc) ? i18n.translationsJs([ ...previewCatalogue() ]) : store.translations(want);
+		return send(res, 200, 'application/javascript; charset=UTF-8', body);
+	}
 	if (segs[0] === 'admin' && segs[1] === 'uci' && segs[2]) {
 		if (req.method !== 'POST') return send(res, 405, 'text/plain', 'Method Not Allowed');
 		await readBody(req);
@@ -677,4 +731,5 @@ server.listen(port, '127.0.0.1', () => {
 	if (store.demo) console.error(`[replay] DEMO mode: recording pseudonymised (${store.demo.macs.size} MACs, ${store.demo.v4nets.size + store.demo.v4other.size} IPv4 networks/addresses, ${store.demo.v6nets.size} IPv6 prefixes, ${store.demo.names.size} names)`);
 	console.error(`[replay] synthetic data ${store.synthetic ? 'ON (realtime stats, conntrack list, wifi scan; --no-synthetic to disable)' : 'OFF'}`);
 	if (store.plugins.size) console.error(`[replay] plugins: ${[ ...store.plugins.keys() ].join(', ')}`);
+	if (preview) console.error(`[replay] language ${preview.code} (${preview.lc}): catalogues from ${preview.dirs.join(', ')} over the recorded one`);
 });

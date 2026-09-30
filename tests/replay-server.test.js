@@ -160,3 +160,57 @@ test('replay server: host, origin, session, headers, escaping, logs', { skip, ti
 		srv.kill('SIGTERM');
 	}
 });
+
+/* --lang: the packages' po/<lang>/*.po over the recorded catalogue, in
+   /admin/translations/<lc> (what cbi.js reads) and in the templates' _() */
+test('replay server: --lang previews the package catalogues', { skip, timeout: 60000 }, async () => {
+	const mkTmp = require('./tmpdir');
+	const tmp = mkTmp('vantage-replaylang-');
+	fs.cpSync(path.join(ROOT, 'luci-theme-vantage'), path.join(tmp, 'luci-theme-vantage'), { recursive: true });
+	fs.cpSync(path.join(ROOT, 'luci-app-vantage'), path.join(tmp, 'luci-app-vantage'), { recursive: true });
+	const head = 'msgid ""\nmsgstr ""\n"Content-Type: text/plain; charset=UTF-8\\n"\n"Plural-Forms: nplurals=2; plural=n != 1;\\n"\n\n';
+	fs.mkdirSync(path.join(tmp, 'luci-app-vantage/po/de'), { recursive: true });
+	fs.writeFileSync(path.join(tmp, 'luci-app-vantage/po/de/vantage.po'), head + 'msgid "Dashboard"\nmsgstr "Übersicht"\n');
+	fs.mkdirSync(path.join(tmp, 'luci-theme-vantage/po/de'), { recursive: true });
+	fs.writeFileSync(path.join(tmp, 'luci-theme-vantage/po/de/vantage-theme.po'), head + 'msgid "Log out"\nmsgstr "Abmelden <b>"\n');
+	const port = await freePort();
+	const srv = spawn(process.execPath, [ path.join(ROOT, 'dev/replay/server.js'), '--mirror', MIRROR, '--rootfs', ROOTFS, '--port', String(port),
+		'--theme-dir', path.join(tmp, 'luci-theme-vantage/htdocs/luci-static/vantage'), '--theme', 'vantage',
+		'--app-dir', path.join(tmp, 'luci-app-vantage'), '--demo', '--lang', 'de' ], { stdio: [ 'ignore', 'ignore', 'pipe' ] });
+	let log = '';
+	srv.stderr.on('data', d => { log += d; });
+	try {
+		for (let i = 0; i < 200 && !log.includes('[replay] http://'); i++) await new Promise(r => setTimeout(r, 50));
+		assert.match(log, /language de \(de\)/, log);
+		const tr = await request(port, 'GET', '/cgi-bin/luci/admin/translations/de');
+		assert.equal(tr.status, 200);
+		assert.match(tr.headers['content-type'], /^application\/javascript/);
+		assert.match(tr.body, /^window\.TR=\{.*\};$/s);
+		/* sfh("Dashboard") = 36ec1dcb, sfh("Log out") = f5cd233a (real .lmo keys) */
+		assert.match(tr.body, /"36ec1dcb":"Übersicht",/);
+		assert.match(tr.body, /"f5cd233a":"Abmelden <b>",/);
+		assert.match(tr.body, /"00000000":"nplurals=2; plural=n != 1;",/);
+		/* edits show on the next request */
+		fs.appendFileSync(path.join(tmp, 'luci-app-vantage/po/de/vantage.po'), '\nmsgid "Log in"\nmsgstr "Anmelden"\n');
+		assert.match((await request(port, 'GET', '/cgi-bin/luci/admin/translations/de')).body, /"3008cc84":"Anmelden",/);
+		/* templates: translated and still escaped */
+		const login = await request(port, 'GET', '/cgi-bin/luci/admin/status/overview');
+		assert.match(login.body, /Anmelden/);
+		const page = await request(port, 'GET', '/cgi-bin/luci/admin/status/overview', { headers: { Cookie: (await request(port, 'POST', '/cgi-bin/luci/admin/status/overview',
+			{ headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'luci_username=root&luci_password=x' })).headers['set-cookie'][0].split(';')[0] } });
+		assert.equal(page.status, 200);
+		assert.match(page.body, /<html lang="de"/);
+		assert.match(page.body, /admin\/translations\/de/);
+		assert.match(page.body, /aria-label="Abmelden &#60;b&#62;"/);
+		assert.doesNotMatch(page.body, /Abmelden <b>/);
+	} finally {
+		srv.kill();
+	}
+	/* an unknown language is refused */
+	const bad = spawn(process.execPath, [ path.join(ROOT, 'dev/replay/server.js'), '--mirror', MIRROR, '--rootfs', ROOTFS, '--port', '1', '--lang', 'xx' ], { stdio: [ 'ignore', 'ignore', 'pipe' ] });
+	let err = '';
+	bad.stderr.on('data', d => { err += d; });
+	const code = await new Promise(r => bad.on('exit', r));
+	assert.equal(code, 2);
+	assert.match(err, /--lang xx: not a LuCI language/);
+});

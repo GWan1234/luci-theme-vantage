@@ -47,11 +47,11 @@ jobs:
         with:
           node-version: '24'
 
-      - name: Build ucode (for the rpcd plugin tests)
+      - name: Build ucode (for the rpcd plugin tests); install gettext
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cmake libjson-c-dev
+          sudo apt-get install -y -qq cmake libjson-c-dev gettext
           git init -q "$RUNNER_TEMP/ucode-src"
           git -C "$RUNNER_TEMP/ucode-src" fetch -q --depth 1 "$UCODE_REPO" "$UCODE_REV"
           git -C "$RUNNER_TEMP/ucode-src" checkout -q FETCH_HEAD
@@ -68,7 +68,14 @@ jobs:
           echo "LD_LIBRARY_PATH=$RUNNER_TEMP/ucode/lib" >> "$GITHUB_ENV"
 
       - name: Unit tests
+        env:
+          # the catalogue tests must not skip msgfmt here
+          VANTAGE_REQUIRE_GETTEXT: '1'
         run: node --test tests/
+
+      - name: Translation templates and catalogues up to date
+        # LuCI's i18n-scan.pl / i18n-update.pl at the SDK's luci feed commit
+        run: dev/i18n/update.sh --check
 
       - name: DOM sink check
         run: node security-tests/check_dom_sinks.js

@@ -9,9 +9,11 @@
 # SDK image. The SDK entrypoint is openwrt/gh-action-sdk's, pinned by hash.
 # The SDK image is pinned by digest (table below). Every package is checked
 # by security-tests/verify_built_apk.js before anything reaches
-# dist/<release>/, which then holds exactly the two packages, SHA256SUMS and
-# BUILDINFO (plus the signed index when signing). Exits 0 only when both
-# packages were built, verified and hashed.
+# dist/<release>/, which then holds exactly the two packages, one language
+# package per po/<lang>/ directory of each (luci-i18n-vantage-<lc>,
+# luci-i18n-vantage-theme-<lc>), SHA256SUMS and BUILDINFO (plus the signed
+# index when signing). Exits 0 only when all of them were built, verified
+# and hashed.
 #
 # Optional environment:
 #   VANTAGE_SDK_IMAGE  SDK image for a release without a pinned digest below;
@@ -125,8 +127,9 @@ done
 #   against a keyring that also trusts OpenWrt's snapshot key); instead
 #   check that the image's SDK is the pinned tarball;
 # - read the signing key from stdin into the variable the entrypoint uses;
-# - afterwards hand out the SDK's apk and jsmin so the host can verify the
-#   packages with the exact tools that built them, plus the feed pins.
+# - afterwards hand out the SDK's apk, jsmin and po2lmo so the host can
+#   verify the packages with the exact tools that built them, plus the feed
+#   pins and the luci feed's luci.mk (language list and package names).
 # shellcheck disable=SC2016
 inner='
 if [ -n "${SDK_SUM:-}" ] && ! grep -Fxq -- "$SDK_SUM" sha256sums_min; then
@@ -146,12 +149,15 @@ if [ "${SIGN:-}" = apk ] && [ -f private-key.pem ]; then
 fi
 rm -f private-key.pem public-key.pem key-build
 cp feeds.conf /artifacts/tools/feeds.conf 2>/dev/null
+cp feeds/luci/luci.mk /artifacts/tools/luci.mk 2>/dev/null
 grep -E "^(# )?CONFIG_LUCI_(JSMIN|CSSTIDY|SRCDIET)[ =]" .config > /artifacts/tools/luci.config 2>/dev/null
 # host/bin/apk is a wrapper around the relocated binary; the binary itself
 # only needs the host C library
 [ ! -f staging_dir/host/bin/.apk.bin ] || cp staging_dir/host/bin/.apk.bin /artifacts/tools/apk
 j=$(find staging_dir -path "*/bin/jsmin" -type f 2>/dev/null | head -n 1)
 [ -z "$j" ] || cp "$j" /artifacts/tools/jsmin
+p=$(find staging_dir -path "*/bin/po2lmo" -type f 2>/dev/null | head -n 1)
+[ -z "$p" ] || cp "$p" /artifacts/tools/po2lmo
 exit "$rc"
 '
 
@@ -188,6 +194,45 @@ if grep -q '^::warning file=' "$work/build.log"; then
 	exit 1
 fi
 
+tools=$work/artifacts/tools
+
+# Language packages, the way the SDK's luci.mk derives them: one per
+# po/<lang>/ directory whose <lang> has a LUCI_LANG entry, named
+# luci-i18n-<LUCI_BASENAME>-<LUCI_LC_ALIAS or lang>, versioned
+# PKG_PO_VERSION. luci.mk silently skips unknown directories; this refuses
+# them, and a PKG_PO_VERSION other than the package version.
+[ -f "$tools/luci.mk" ] || die "the SDK's feeds/luci/luci.mk was not handed out; log: $work/build.log"
+for pkg in $packages; do
+	[ -d "$work/feed/$pkg/po" ] || continue
+	mk=$work/feed/$pkg/Makefile
+	ver=$(sed -n 's/^PKG_VERSION:=//p' "$mk")
+	rel=$(sed -n 's/^PKG_RELEASE:=//p' "$mk")
+	base=$(sed -n 's/^LUCI_BASENAME:=//p' "$mk")
+	base=${base:-${pkg#luci-*-}}
+	[[ $base =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "$pkg/Makefile: unusual LUCI_BASENAME $base"
+	for dir in "$work/feed/$pkg/po"/*; do
+		[ -e "$dir" ] || continue
+		lang=${dir##*/}
+		[ "$lang" != templates ] || continue
+		[[ $lang =~ ^[A-Za-z_]+$ ]] && [ -d "$dir" ] && grep -Eq "^LUCI_LANG\.$lang=." "$tools/luci.mk" ||
+			die "$pkg/po/$lang: not a language directory of the SDK's luci.mk (LUCI_LANG.$lang)"
+		[ "$(sed -n 's/^PKG_PO_VERSION:=//p' "$mk")" = '$(PKG_VERSION)-r$(PKG_RELEASE)' ] ||
+			die "$pkg/Makefile: language packages need PKG_PO_VERSION:=\$(PKG_VERSION)-r\$(PKG_RELEASE)"
+		lc=$(sed -n "s/^LUCI_LC_ALIAS\.$lang=\([^ ]*\).*/\1/p" "$tools/luci.mk")
+		lc=${lc:-$lang}
+		if [ "$fmt" = apk ]; then
+			expected+=("luci-i18n-$base-$lc-$ver-r$rel.apk")
+		else
+			expected+=("luci-i18n-${base}-${lc}_$ver-r${rel}_all.ipk")
+		fi
+	done
+done
+# the i18n tooling should use the luci feed commit this SDK builds with
+want_luci=$(sed -n 's/^LUCI_REV=\([0-9a-f]\{40\}\)$/\1/p' "$work/feed/dev/i18n/update.sh" 2>/dev/null || true)
+have_luci=$(sed -n 's|^src-git luci [^ ]*\^\([0-9a-f]\{40\}\)$|\1|p' "$tools/feeds.conf" 2>/dev/null || true)
+[ -z "$want_luci" ] || [ "$want_luci" = "$have_luci" ] ||
+	echo "sdk-build: warning: dev/i18n/update.sh pins LuCI $want_luci, the SDK's luci feed is ${have_luci:-unknown}" >&2
+
 # exactly the expected packages, nothing else
 mapfile -t built < <(find "$work/artifacts/bin" -type f \( -name 'luci-*-vantage*.apk' -o -name 'luci-*-vantage*.ipk' \) | sort)
 names=$(printf '%s\n' "${built[@]##*/}" | sort)
@@ -210,10 +255,10 @@ if [ -n "$sign" ]; then
 	done
 fi
 
-tools=$work/artifacts/tools
-verify=(--src "$work/feed" --require-tools)
+verify=(--src "$work/feed" --require-tools --luci-mk "$tools/luci.mk")
 [ ! -x "$tools/apk" ] || verify+=(--apk-tool "$tools/apk")
 [ ! -x "$tools/jsmin" ] || verify+=(--jsmin "$tools/jsmin")
+[ ! -x "$tools/po2lmo" ] || verify+=(--po2lmo "$tools/po2lmo")
 [ ! -f "$tools/luci.config" ] || verify+=(--luci-config "$tools/luci.config")
 if [ "$sign" = apk ]; then
 	mkdir "$work/keys"
@@ -251,6 +296,7 @@ out="$repo/dist/$release"
 mkdir -p "$out"
 rm -f -- "$out"/luci-theme-vantage[-_]*.apk "$out"/luci-theme-vantage[-_]*.ipk \
 	"$out"/luci-app-vantage[-_]*.apk "$out"/luci-app-vantage[-_]*.ipk \
+	"$out"/luci-i18n-vantage-*.apk "$out"/luci-i18n-vantage-*.ipk \
 	"$out"/SHA256SUMS "$out"/BUILDINFO \
 	"$out"/packages.adb "$out"/Packages "$out"/Packages.gz "$out"/Packages.sig
 cp -- "$work/out"/* "$out/"
@@ -258,12 +304,12 @@ extra=$(find "$out" -mindepth 1 -maxdepth 1 ! -name 'luci-*-vantage[-_]*' ! -nam
 	! -name packages.adb ! -name 'Packages*' -printf '%f\n')
 [ -z "$extra" ] || echo "sdk-build: warning: $out also holds files this script did not write: $extra" >&2
 
-# keep the SDK's apk and jsmin so verify_built_apk.js can re-check dist/
-# later without an SDK (dist/ is not committed)
+# keep the SDK's apk, jsmin, po2lmo and luci.mk so verify_built_apk.js can
+# re-check dist/ later without an SDK (dist/ is not committed)
 tcache="$repo/dist/.tools/$release"
 mkdir -p "$tcache"
-for t in apk jsmin luci.config; do
-	[ ! -f "$tools/$t" ] || install -m "$([ "$t" = luci.config ] && echo 0644 || echo 0755)" -- "$tools/$t" "$tcache/$t"
+for t in apk jsmin po2lmo luci.config luci.mk; do
+	[ ! -f "$tools/$t" ] || install -m "$(case $t in *.*) echo 0644 ;; *) echo 0755 ;; esac)" -- "$tools/$t" "$tcache/$t"
 done
 
 cat "$out/SHA256SUMS"

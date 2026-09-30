@@ -8,7 +8,7 @@ Nothing is forwarded anywhere; there is no upstream.
         [--theme-dir <pkg>/htdocs/luci-static/<name>] [--theme <name>] \
         [--templates <pkg>/ucode/template] [--rootfs <device rootfs dump>] \
         [--app-dir <luci-app package dir>]... [--keep-uniwrt] [--no-synthetic] \
-        [--demo]
+        [--demo] [--lang <lang>]
 
 Open <http://127.0.0.1:8025/>. Any username/password logs in; the session
 lasts until the replay restarts (log in again after a restart).
@@ -173,6 +173,35 @@ calls then answer from the recording or NOT_FOUND as before).
 - `iwinfo info radioN` when the mirror only recorded it for the radio's
   first interface (`phy6g-ap0`): answered with that interface's recorded
   sample, as iwinfo itself resolves a radio name.
+
+## Translation preview (`--lang`)
+
+`--lang <lang>` runs the UI in a language, for translators: `<lang>` is a
+LuCI language code (`de`, `zh_Hans`, the name of a `po/` directory) or its
+package suffix (`zh-cn`); `dev/i18n/luci-languages.mk` lists them. The
+replay then does what LuCI does with installed language packages:
+
+- `dispatcher.lang` is the suffix, so pages load
+  `/cgi-bin/luci/admin/translations/<suffix>` and carry `lang="<suffix>"`;
+- that URL answers `window.TR={...};` in the format of luci-base's
+  `action_translations`, keyed by LuCI's `sfh` hash: the recorded catalogue
+  for the language (if the recording has one), then every
+  `po/<lang>/*.po` of the theme package (three levels above
+  `--theme-dir`) and of each `--app-dir`, compiled the way `po2lmo` does
+  (`dev/i18n/catalog.js`, checked against real `.lmo` files in
+  `tests/i18n.test.js`); the packages' entries win;
+- the templates' `_()` looks strings up in the same catalogue, with LuCI's
+  whitespace canonicalisation, and falls back to the English text.
+
+The `.po` files are read on every request: save, reload, see the change.
+`N_()` in templates keeps English plurals. LuCI's own strings stay English
+unless the recording contains that language's catalogue.
+
+```sh
+node dev/replay/server.js --mirror ../vantage-mirror --port 8106 --demo \
+    --theme-dir luci-theme-vantage/htdocs/luci-static/vantage --theme vantage \
+    --app-dir luci-app-vantage --lang de
+```
 
 ## Demo mode (`--demo`)
 

@@ -7,6 +7,9 @@ public issue.
 Using a coding agent? Point it at [AGENTS.md](AGENTS.md); it holds the same
 rules in a compact form.
 
+Translations are especially welcome: see [Translations](#translations)
+for how to add or update a language.
+
 ## Reporting a bug
 
 Please include:
@@ -64,12 +67,91 @@ node security-tests/test_acl_policy.js
 node security-tests/check_private_addresses.js [--require-mirror --mirror ../vantage-mirror]
 ```
 
+When you add, change or remove a user-visible string, also run
+`dev/i18n/update.sh` and commit the updated templates
+(`po/templates/*.pot`) and catalogues; CI runs `dev/i18n/update.sh --check`.
+
 For changes to Makefiles, `root/` files or install scripts, also build the
 packages (commit first; the script builds a clean clone of the commit):
 
 ```sh
 dev/build/sdk-build.sh 25.12.4
 ```
+
+## Translations
+
+Each package has its own catalogue, generated with LuCI's own tools:
+
+| Package | Template | Catalogue for a language |
+|---|---|---|
+| dashboard | `luci-app-vantage/po/templates/vantage.pot` | `luci-app-vantage/po/<lang>/vantage.po` |
+| theme | `luci-theme-vantage/po/templates/vantage-theme.pot` | `luci-theme-vantage/po/<lang>/vantage-theme.po` |
+
+`dev/i18n/update.sh` needs git, perl and GNU gettext (Debian/Ubuntu:
+`apt install gettext`; macOS: `brew install gettext`). On its first run it
+fetches LuCI's i18n scripts at the commit the pinned SDK builds with
+(about 2 MB, cached in `~/.cache/vantage/`).
+
+**Add a language.** `<lang>` is LuCI's code for it, as in LuCI's own
+`po/` directories: `de`, `fr`, `pt_BR`, `zh_Hans`, ...
+(`dev/i18n/luci-languages.mk` lists them all):
+
+```sh
+dev/i18n/update.sh --add de
+```
+
+This creates both catalogues from the templates. Translate them with any
+PO editor (Poedit, Lokalize, or a text editor): fill in each `msgstr`. An
+empty `msgstr` keeps the English text, so you can translate in several
+steps.
+
+**Update a language** after the sources changed (or before you start, to
+be current):
+
+```sh
+dev/i18n/update.sh
+```
+
+It regenerates the templates from the sources and merges them into every
+catalogue, the way LuCI's `i18n-update.pl` does: new strings arrive with an
+empty `msgstr`, removed ones are kept at the end as obsolete (`#~`)
+entries.
+
+Rules for translations:
+
+- **Change the words, never the format.** Keep every placeholder (`%s`,
+  `%d`, ...) of the English text, in the same order (LuCI fills them by
+  position), and keep numbers and units as the code writes them:
+  `"(configured %d dBm, limited by regulatory rules)"` becomes
+  `"(eingestellt %d dBm, durch Vorschriften begrenzt)"`: the words change,
+  `%d dBm` does not. `tests/i18n.test.js` checks the placeholders.
+- No markup: a translation may not add `<` or `>`.
+- Labels, table headers and pills have little room; keep them short.
+
+**Preview** your translation in the replay: add `--lang <lang>` to the
+replay command above (`--lang de`). The theme's and the dashboard's
+strings then show in that language, straight from your `.po` files; reload
+after each edit. LuCI's own strings stay in English unless the recording
+contains that language.
+
+**Check** before opening the pull request:
+
+```sh
+node --test tests/          # compiles every catalogue (msgfmt -c), checks placeholders
+dev/i18n/update.sh --check
+```
+
+A translation pull request touches only `po/` files. If you find a text in
+the UI that cannot be translated yet, make that a separate change to the
+code: wrap the string in `_()` with the English text as it is shown today,
+keeping the display format in a format string (`_('%s Gbit/s').format(v)`,
+`_('%d dBm').format(p)`) rather than switching to another formatting
+helper, run `dev/i18n/update.sh` and commit the templates with it.
+
+CI builds one language package per package and language
+(`luci-i18n-vantage-<lang>` and `luci-i18n-vantage-theme-<lang>`, with
+`<lang>` as LuCI's package suffix, e.g. `zh-cn`) and checks each against
+your catalogues; there is nothing else to set up.
 
 ## Rules
 

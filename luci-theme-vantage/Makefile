@@ -27,6 +27,13 @@ LUCI_URL:=https://github.com/anothaDev/luci-theme-vantage
 # is set (checked: the minified theme scripts parse and keep every regex).
 LUCI_MINIFY_CSS:=0
 
+# Language packages (po/<lang>/vantage-theme.po): luci.mk would name them
+# after "vantage", like the app's; this keeps them apart
+# (luci-i18n-vantage-theme-<lang>, i18n/vantage-theme.<lang>.lmo) and gives
+# them the package version instead of one derived from git history.
+LUCI_BASENAME:=vantage-theme
+PKG_PO_VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)
+
 define Package/luci-theme-vantage/postrm
 #!/bin/sh
 [ -n "$${IPKG_INSTROOT}" ] || {

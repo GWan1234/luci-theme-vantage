@@ -18,6 +18,7 @@ Two OpenWrt 25.12 LuCI packages plus offline tooling. No npm, no
 | `dev/mirror/` | Recorders that read a real device. Do not run them (rule 1) |
 | `dev/build/` | `sdk-build.sh`: reproducible build in the OpenWrt SDK image (podman) |
 | `dev/icons/build.js` | Generates the status icon set; edit the generator, not the SVGs |
+| `dev/i18n/` | `update.sh`: translation templates and catalogues (`po/`) with LuCI's i18n tools; `catalog.js`: LuCI's catalogue format (tests, replay `--lang`) |
 | `tests/`, `security-tests/` | `node:test` suite and the four security checks |
 | `prototypes/` | Design references. Do not edit or ship them |
 | `docs/` | `SPEC.md` (product), `luci-contract.md` (what LuCI needs from a theme), `INSTALL.md` |
@@ -106,6 +107,7 @@ Run all of these before you call a change done:
 
 ```sh
 node --test tests/            # UCODE=/path/to/ucode also runs the real rpcd plugin
+dev/i18n/update.sh --check    # translation templates match the sources
 node security-tests/check_dom_sinks.js
 node security-tests/test_templates.js
 node security-tests/test_acl_policy.js
@@ -135,6 +137,19 @@ the result.
   you are in. No ES modules, no dependencies, no CDNs, no web fonts.
 - CSS is shipped unminified (`LUCI_MINIFY_CSS:=0`) because it uses modern
   syntax; JS may go through LuCI's jsmin in builds.
+- **Translations.** Wrap every user-visible string in `_()` (templates:
+  `entityencode(_('...'), true)`), including titles, tooltips and
+  `aria-label`s. Translation changes the words only, never the display
+  format: keep today's output exactly (e.g. link speeds `2.5 Gbit/s`, TX
+  power `0 dBm`) by putting the format into the string,
+  `_('%s Gbit/s').format(v)`, `_('%d dBm').format(p)`, rather than
+  switching to other `fmt` helpers. Placeholders are positional (LuCI's
+  `String.format`). After adding, changing or removing strings, run
+  `dev/i18n/update.sh` and commit `po/templates/*.pot` and the updated
+  catalogues; CI fails on `dev/i18n/update.sh --check` otherwise.
+  Catalogues are `luci-app-vantage/po/<lang>/vantage.po` and
+  `luci-theme-vantage/po/<lang>/vantage-theme.po`; nothing else goes in
+  `po/`.
 - Comments are short and say why, not what.
 - Status icons come from `dev/icons/build.js`; regenerate them, don't
   hand-edit the SVGs.

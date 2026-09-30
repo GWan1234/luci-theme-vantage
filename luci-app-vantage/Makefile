@@ -35,6 +35,11 @@ LUCI_URL:=https://github.com/anothaDev/luci-theme-vantage
 # which csstidy (a CSS2-era minifier) mangles; ship it byte for byte.
 LUCI_MINIFY_CSS:=0
 
+# Language packages (po/<lang>/vantage.po) are luci-i18n-vantage-<lang>
+# (luci.mk's default name) and carry the package version instead of one
+# derived from git history.
+PKG_PO_VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)
+
 define Package/luci-app-vantage/conffiles
 /etc/config/vantage
 endef

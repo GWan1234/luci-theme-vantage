@@ -16,17 +16,25 @@
  *                       `apk` in PATH)
  *   --jsmin <path>      LuCI's jsmin (default: $VANTAGE_JSMIN, then
  *                       dist/.tools/<release>/jsmin)
+ *   --po2lmo <path>     LuCI's po2lmo (default: $VANTAGE_PO2LMO, then
+ *                       dist/.tools/<release>/po2lmo)
+ *   --luci-mk <file>    luci.mk of the build's luci feed, for the language
+ *                       list (default: dist/.tools/<release>/luci.mk, then
+ *                       dev/i18n/luci-languages.mk)
  *   --luci-config <f>   CONFIG_LUCI_* lines of the build's .config
  *                       (default: dist/.tools/<release>/luci.config)
  *   --index <file>      signed apk index (packages.adb) to check as well
  *   --keys-dir <dir>    public key(s) the index must verify against
  *   --mirror <dir>      private data mirror for check_private_addresses
  *                       (default: $VANTAGE_MIRROR, then ../vantage-mirror)
- *   --require-tools     fail instead of skipping when apk or jsmin is missing
+ *   --require-tools     fail instead of skipping when apk, jsmin or (for
+ *                       language packages) po2lmo is missing
  *                       (sdk-build.sh passes this)
  *
- * A directory argument means every *.apk / *.ipk in it (not recursive); a
- * SHA256SUMS file there must then list exactly those packages, correctly.
+ * A directory argument means every *.apk / *.ipk in it (not recursive): they
+ * must be exactly the packages the source defines (both packages and their
+ * language packages), and a SHA256SUMS file there must list exactly those
+ * packages, correctly.
  *
  * Per package, expectations come from the package's Makefile and files in
  * the source tree, never from the package itself:
@@ -53,6 +61,17 @@
  *     packaged file hashes
  *   - no private addresses or recorded device identifiers
  *     (check_private_addresses.js detectors) in any packaged text or script
+ *
+ * Language packages (luci.mk's LuciTranslation, one per po/<lang>/ of a
+ * package whose <lang> has a LUCI_LANG entry): name
+ * luci-i18n-<LUCI_BASENAME>-<LUCI_LC_ALIAS or lang>, version from
+ * PKG_PO_VERSION (which must be $(PKG_VERSION)-r$(PKG_RELEASE)), noarch,
+ * license, depends exactly libc + the parent package, the scripts
+ * package-pack.mk generates for a package without postinst, and exactly two
+ * kinds of payload file: /etc/uci-defaults/luci-i18n-<base>-<lc> with the
+ * exact line luci.mk writes, and one /usr/lib/lua/luci/i18n/<po>.<lc>.lmo
+ * per po/<lang>/*.po, byte-identical to po2lmo's output for that file (none
+ * when po2lmo writes none, as for a catalogue without translations).
  *
  * The .ipk path (OpenWrt 23.05/24.10) follows the same rules but has not
  * been exercised against a real build of those releases.
@@ -121,8 +140,98 @@ function parseMakefile(text, file) {
 	for (const hook of Object.keys(hooks))
 		if (![ 'preinst', 'postinst', 'prerm', 'postrm', 'conffiles' ].includes(hook))
 			throw new Error(`${file}: unknown hook Package/${name}/${hook}`);
-	return { name, version, release, fullVersion: `${version}-r${release}`, license: vars.PKG_LICENSE || '',
-		depends, script, conffiles, minifyCss: vars.LUCI_MINIFY_CSS !== '0' };
+	/* luci.mk: LUCI_BASENAME?=$(patsubst luci-$(LUCI_TYPE)-%,%,$(LUCI_NAME)) */
+	const basename = vars.LUCI_BASENAME || name.replace(/^luci-[^-]+-/, '');
+	if (!/^[a-z0-9][a-z0-9-]*$/.test(basename)) throw new Error(`${file}: unusual LUCI_BASENAME ${basename}`);
+	const fullVersion = `${version}-r${release}`;
+	/* language packages are versioned PKG_PO_VERSION; anything but the
+	   package version (luci.mk's default is derived from git history) is
+	   not reproducible from the Makefile */
+	const poVersion = vars.PKG_PO_VERSION === '$(PKG_VERSION)-r$(PKG_RELEASE)' ? fullVersion : null;
+	return { name, version, release, fullVersion, license: vars.PKG_LICENSE || '',
+		depends, script, conffiles, minifyCss: vars.LUCI_MINIFY_CSS !== '0', basename, poVersion,
+		poVersionRaw: vars.PKG_PO_VERSION || null };
+}
+
+/* ------------------------------------------------------- language packages */
+
+/* luci.mk's LUCI_LANG.<lang>=<name> and LUCI_LC_ALIAS.<lang>=<suffix> */
+function parseLuciLanguages(text, file) {
+	const names = new Map(), alias = new Map();
+	for (const line of text.split('\n')) {
+		let m = line.match(/^LUCI_LANG\.([A-Za-z_]+)=(.*)$/);
+		if (m) {
+			/* luci.mk puts the name into echo "...'<name>'..."; keep to names
+			   that pass through make and the shell unchanged */
+			if (!m[2] || /["'`$\\]/.test(m[2])) throw new Error(`${file}: LUCI_LANG.${m[1]} has characters the verifier does not model`);
+			names.set(m[1], m[2]);
+			continue;
+		}
+		m = line.match(/^LUCI_LC_ALIAS\.([A-Za-z_]+)=(.*)$/);
+		if (m) alias.set(m[1], m[2].trim().split(/\s+/)[0]);
+	}
+	if (!names.size) throw new Error(`${file}: no LUCI_LANG entries`);
+	const out = new Map();
+	for (const [ lang, name ] of names) {
+		/* $(firstword $(LUCI_LC_ALIAS.$(lang)) $(lang)) */
+		const lc = alias.get(lang) || lang;
+		if (!/^[A-Za-z0-9_-]+$/.test(lc)) throw new Error(`${file}: unusual package suffix ${lc} for ${lang}`);
+		out.set(lang, { name, lc });
+	}
+	return out;
+}
+
+/*
+ * The language packages luci.mk defines for one package: one per entry of
+ * po/ other than templates/ with a LUCI_LANG entry. luci.mk skips unknown
+ * entries silently; they are errors here.
+ */
+function languagePackages(pkgDir, mk, langs) {
+	const po = path.join(pkgDir, 'po');
+	if (!fs.existsSync(po)) return [];
+	const out = [];
+	for (const lang of fs.readdirSync(po).filter(e => !e.startsWith('.')).sort()) {
+		if (lang === 'templates') continue;
+		const dir = path.join(po, lang);
+		if (!fs.lstatSync(dir).isDirectory() || !langs || !langs.has(lang))
+			throw new Error(`${mk.name}/po/${lang}: not a LuCI language directory (no LUCI_LANG.${lang} in luci.mk)`);
+		const { name: langName, lc } = langs.get(lang);
+		/* $(wildcard po/<lang>/*.po) */
+		const catalogs = fs.readdirSync(dir).filter(f => f.endsWith('.po') && !f.startsWith('.')).sort().map(f => {
+			const abs = path.join(dir, f);
+			const st = fs.lstatSync(abs);
+			if (st.isSymbolicLink() || !st.isFile()) throw new Error(`${mk.name}/po/${lang}/${f}: not a regular file`);
+			return { src: abs, lmo: `usr/lib/lua/luci/i18n/${f.slice(0, -3)}.${lc}.lmo` };
+		});
+		out.push({ name: `luci-i18n-${mk.basename}-${lc}`, parent: mk.name, lang, lc, langName, catalogs,
+			uciDefaults: `etc/uci-defaults/luci-i18n-${mk.basename}-${lc}`,
+			uciLine: `uci set luci.languages.${lc.replace(/-/g, '_')}='${langName}'; uci commit luci\n` });
+	}
+	return out;
+}
+
+/* every package (name -> { kind, mk, lang? }) the source tree defines */
+function sourcePackages(srcRoot, langs) {
+	const out = new Map();
+	for (const name of PACKAGES) {
+		const mk = parseMakefile(fs.readFileSync(path.join(srcRoot, name, 'Makefile'), 'utf8'), `${name}/Makefile`);
+		out.set(name, { kind: 'main', mk });
+		for (const l of languagePackages(path.join(srcRoot, name), mk, langs)) {
+			if (out.has(l.name)) throw new Error(`${l.name}: defined twice (LUCI_BASENAME collision)`);
+			out.set(l.name, { kind: 'lang', mk, lang: l });
+		}
+	}
+	/* one i18n directory for all packages: catalogue files must not clash */
+	const lmo = new Map();
+	for (const [ name, p ] of out) if (p.kind === 'lang') for (const c of p.lang.catalogs) {
+		if (lmo.has(c.lmo)) throw new Error(`/${c.lmo} would be in both ${lmo.get(c.lmo)} and ${name}`);
+		lmo.set(c.lmo, name);
+	}
+	return out;
+}
+
+function packageFileName(name, version, fmt) {
+	return fmt === 'ipk' ? `${name}_${version}_all.ipk` : `${name}-${version}.${fmt}`;
 }
 
 /* ------------------------------------------------ expected scripts (OpenWrt) */
@@ -133,10 +242,12 @@ const LUCI_POSTINST = '[ -n "${IPKG_INSTROOT}" ] || { rm -f /tmp/luci-indexcache
 
 const dropShebangs = s => s.split('\n').filter(l => !/^\s*#!/.test(l)).join('\n');
 
-/* include/package-pack.mk (25.12): scripts apk mkpkg receives */
+/* include/package-pack.mk (25.12): scripts apk mkpkg receives; mk.name and
+   mk.script, plus noDefaultPostinst for packages luci.mk gives no postinst
+   (language packages) */
 function expectedApkScripts(mk) {
 	const name = mk.name;
-	const postinstPkg = mk.script.postinst != null ? mk.script.postinst + '\n' : LUCI_POSTINST;
+	const postinstPkg = mk.script.postinst != null ? mk.script.postinst + '\n' : mk.noDefaultPostinst ? '' : LUCI_POSTINST;
 	const lib = '[ -s ${IPKG_INSTROOT}/lib/functions.sh ] || exit 0\n. ${IPKG_INSTROOT}/lib/functions.sh\n' +
 		'export root="${IPKG_INSTROOT}"\n' + `export pkgname="${name}"\n`;
 	const s = {};
@@ -160,8 +271,9 @@ function expectedIpkScripts(mk) {
 			'. ${IPKG_INSTROOT}/lib/functions.sh\ndefault_postinst $0 $@\n',
 		prerm: '#!/bin/sh\n[ -s ${IPKG_INSTROOT}/lib/functions.sh ] || exit 0\n. ${IPKG_INSTROOT}/lib/functions.sh\n' +
 			'default_prerm $0 $@\n',
-		'postinst-pkg': mk.script.postinst != null ? mk.script.postinst + '\n' : LUCI_POSTINST,
 	};
+	if (mk.script.postinst != null) s['postinst-pkg'] = mk.script.postinst + '\n';
+	else if (!mk.noDefaultPostinst) s['postinst-pkg'] = LUCI_POSTINST;
 	if (mk.script.prerm != null) s['prerm-pkg'] = mk.script.prerm + '\n';
 	if (mk.script.preinst != null) s.preinst = mk.script.preinst + '\n';
 	if (mk.script.postrm != null) s.postrm = mk.script.postrm + '\n';
@@ -355,55 +467,37 @@ const IPK_CONTROL_KEYS = new Set([ 'Package', 'Version', 'Depends', 'Provides', 
 
 const sameList = (a, b) => JSON.stringify([ ...a ].sort()) === JSON.stringify([ ...b ].sort());
 
-/*
- * pkg: normalised package (readApk/readIpk), root: its extracted payload,
- * srcRoot: source tree, ctx: { jsmin, jsminOn, identifiers, findings }
- */
-function checkPackage(pkg, root, srcRoot, ctx) {
-	const errors = [ ...pkg.errors ];
-	const notes = [];
-	const name = pkg.info.name;
-	if (!PACKAGES.includes(name)) return { errors: [ `unexpected package name ${name}` ], notes };
-	const mk = parseMakefile(fs.readFileSync(path.join(srcRoot, name, 'Makefile'), 'utf8'), `${name}/Makefile`);
-	const payload = sourcePayload(path.join(srcRoot, name));
-
-	/* metadata */
+/* metadata both kinds of package share; want: { name, version, license, depends } */
+function checkMetadata(pkg, want, errors) {
 	const ipk = pkg.format === 'ipk';
-	if (pkg.info.version !== mk.fullVersion && !(ipk && pkg.info.version === `${mk.version}-${mk.release}`))
-		errors.push(`version ${pkg.info.version}, Makefile says ${mk.fullVersion}`);
+	const v = pkg.info.version;
+	if (v !== want.version && !(ipk && v === want.version.replace(/-r(\d+)$/, '-$1')))
+		errors.push(`version ${v}, expected ${want.version}`);
 	if (pkg.info.arch !== (ipk ? 'all' : 'noarch')) errors.push(`arch ${pkg.info.arch}, expected ${ipk ? 'all' : 'noarch'}`);
-	if (mk.license && pkg.info.license !== mk.license) errors.push(`license ${pkg.info.license}, Makefile says ${mk.license}`);
-	const wantDeps = [ 'libc', ...mk.depends ];
-	if (!sameList(pkg.info.depends || [], wantDeps)) errors.push(`depends [${(pkg.info.depends || []).join(', ')}], expected [${wantDeps.join(', ')}]`);
+	if (want.license && pkg.info.license !== want.license) errors.push(`license ${pkg.info.license}, Makefile says ${want.license}`);
+	if (!sameList(pkg.info.depends || [], want.depends)) errors.push(`depends [${(pkg.info.depends || []).join(', ')}], expected [${want.depends.join(', ')}]`);
 	const prov = pkg.info.provides || [];
-	if (!(prov.length === 0 || (prov.length === 1 && prov[0] === `${name}-any`))) errors.push(`provides [${prov.join(', ')}]`);
+	if (!(prov.length === 0 || (prov.length === 1 && prov[0] === `${want.name}-any`))) errors.push(`provides [${prov.join(', ')}]`);
 	if (ipk) {
 		for (const k of Object.keys(pkg.control)) if (!IPK_CONTROL_KEYS.has(k)) errors.push(`unexpected control field ${k}`);
 	} else {
 		for (const k of Object.keys(pkg.info)) if (!APK_INFO_KEYS.has(k)) errors.push(`unexpected info field ${k}`);
 		for (const k of pkg.extraKeys) errors.push(`unexpected package section ${k}`);
 	}
+}
 
-	/* scripts */
-	const wantScripts = ipk ? expectedIpkScripts(mk) : expectedApkScripts(mk);
+function checkScripts(pkg, wantScripts, errors) {
 	for (const k of new Set([ ...Object.keys(wantScripts), ...Object.keys(pkg.scripts) ])) {
 		if (!(k in pkg.scripts)) errors.push(`script ${k} missing`);
 		else if (!(k in wantScripts)) errors.push(`unexpected script ${k}`);
 		else if (pkg.scripts[k] !== wantScripts[k]) errors.push(`script ${k} differs from what the Makefile/luci.mk generate`);
 	}
+}
 
-	/* expected file set */
-	const meta = new Map();
-	if (!ipk) {
-		meta.set(`lib/apk/packages/${name}.list`, 'list');
-		if (mk.conffiles) {
-			meta.set(`lib/apk/packages/${name}.conffiles`, 'conffiles');
-			meta.set(`lib/apk/packages/${name}.conffiles_static`, 'conffiles_static');
-		}
-	}
-	const wantFiles = new Set([ ...payload.keys(), ...meta.keys() ]);
+/* file set, directories, owners and modes; want: Map path -> mode (files) */
+function checkTree(pkg, want, errors) {
 	const wantDirs = new Set([ '' ]);
-	for (const f of wantFiles) for (let d = path.posix.dirname(f); d !== '.'; d = path.posix.dirname(d)) wantDirs.add(d);
+	for (const f of want.keys()) for (let d = path.posix.dirname(f); d !== '.'; d = path.posix.dirname(d)) wantDirs.add(d);
 	const gotFiles = new Set(), gotDirs = new Set();
 	for (const e of pkg.entries) {
 		const where = `/${e.path}`;
@@ -412,15 +506,86 @@ function checkPackage(pkg, root, srcRoot, ctx) {
 		if (e.extra && e.extra.length) errors.push(`${where}: extra attributes ${e.extra.join(', ')}`);
 		if (e.mode & 0o7000) errors.push(`${where}: setuid/setgid/sticky mode ${e.mode.toString(8)}`);
 		if (e.mode & 0o022) errors.push(`${where}: group- or world-writable mode ${e.mode.toString(8)}`);
-		let want;
-		if (e.dir) want = 0o755;
-		else if (payload.has(e.path)) want = /^etc\/uci-defaults\//.test(e.path) ? 0o755 : payload.get(e.path).mode;
-		else want = 0o644;
-		if ((e.mode & 0o7777) !== want) errors.push(`${where}: mode ${(e.mode & 0o7777).toString(8)}, expected ${want.toString(8)}`);
+		const m = e.dir ? 0o755 : want.has(e.path) ? want.get(e.path) : 0o644;
+		if ((e.mode & 0o7777) !== m) errors.push(`${where}: mode ${(e.mode & 0o7777).toString(8)}, expected ${m.toString(8)}`);
 	}
-	for (const f of gotFiles) if (!wantFiles.has(f)) errors.push(`/${f}: in the package but not in the source`);
-	for (const f of wantFiles) if (!gotFiles.has(f)) errors.push(`/${f}: missing from the package`);
+	for (const f of gotFiles) if (!want.has(f)) errors.push(`/${f}: in the package but not in the source`);
+	for (const f of want.keys()) if (!gotFiles.has(f)) errors.push(`/${f}: missing from the package`);
 	for (const d of gotDirs) if (!wantDirs.has(d)) errors.push(`/${d}/: unexpected directory`);
+	return gotFiles;
+}
+
+/* apk's lib/apk/packages/<name>.list: exactly the payload files */
+function checkApkList(root, name, payloadPaths, errors) {
+	const listFile = path.join(root, `lib/apk/packages/${name}.list`);
+	if (!fs.existsSync(listFile)) return;
+	const listed = fs.readFileSync(listFile, 'utf8').split('\n').filter(Boolean);
+	if (!sameList(listed, payloadPaths.map(p => '/' + p))) errors.push(`${name}.list does not list exactly the payload files`);
+}
+
+/* private addresses and recorded identifiers in scripts and text files */
+function scanTexts(pkg, root, gotFiles, ctx, errors) {
+	if (!ctx.findings) return;
+	const texts = [ ...Object.entries(pkg.scripts).map(([ k, v ]) => [ `script ${k}`, v ]) ];
+	for (const f of gotFiles) {
+		const abs = path.join(root, f);
+		if (!fs.existsSync(abs)) continue;
+		const buf = fs.readFileSync(abs);
+		if (!buf.includes(0)) texts.push([ `/${f}`, buf.toString('utf8') ]);
+	}
+	for (const [ where, text ] of texts)
+		for (const [ line, what ] of ctx.findings(text, ctx.identifiers)) errors.push(`${where}:${line}: ${what}`);
+}
+
+/* the language package called name, from the Makefiles and po/ trees in srcRoot */
+function findLanguagePackage(name, srcRoot, langs) {
+	for (const parent of PACKAGES) {
+		const mf = path.join(srcRoot, parent, 'Makefile');
+		if (!fs.existsSync(mf)) continue;
+		const mk = parseMakefile(fs.readFileSync(mf, 'utf8'), `${parent}/Makefile`);
+		for (const l of languagePackages(path.join(srcRoot, parent), mk, langs)) if (l.name === name) return { mk, lang: l };
+	}
+	return null;
+}
+
+/*
+ * pkg: normalised package (readApk/readIpk), root: its extracted payload,
+ * srcRoot: source tree, ctx: { jsmin, jsminOn, identifiers, findings,
+ * langs (parseLuciLanguages), po2lmo }
+ */
+function checkPackage(pkg, root, srcRoot, ctx) {
+	const name = pkg.info.name;
+	if (PACKAGES.includes(name)) return checkMainPackage(pkg, root, srcRoot, ctx);
+	if (/^luci-i18n-[a-z0-9-]+$/.test(name || '')) {
+		if (!ctx.langs) return { errors: [ `${name}: a language package, but no luci.mk language list (pass --luci-mk)` ], notes: [] };
+		const found = findLanguagePackage(name, srcRoot, ctx.langs);
+		if (found) return checkLanguagePackage(pkg, root, found.mk, found.lang, ctx);
+	}
+	return { errors: [ `unexpected package name ${name}` ], notes: [] };
+}
+
+function checkMainPackage(pkg, root, srcRoot, ctx) {
+	const errors = [ ...pkg.errors ];
+	const notes = [];
+	const name = pkg.info.name;
+	const mk = parseMakefile(fs.readFileSync(path.join(srcRoot, name, 'Makefile'), 'utf8'), `${name}/Makefile`);
+	const payload = sourcePayload(path.join(srcRoot, name));
+	const ipk = pkg.format === 'ipk';
+
+	checkMetadata(pkg, { name, version: mk.fullVersion, license: mk.license, depends: [ 'libc', ...mk.depends ] }, errors);
+	checkScripts(pkg, ipk ? expectedIpkScripts(mk) : expectedApkScripts(mk), errors);
+
+	/* expected file set: payload (uci-defaults scripts 0755) + apk metadata */
+	const want = new Map();
+	for (const [ rel, s ] of payload) want.set(rel, /^etc\/uci-defaults\//.test(rel) ? 0o755 : s.mode);
+	if (!ipk) {
+		want.set(`lib/apk/packages/${name}.list`, 0o644);
+		if (mk.conffiles) {
+			want.set(`lib/apk/packages/${name}.conffiles`, 0o644);
+			want.set(`lib/apk/packages/${name}.conffiles_static`, 0o644);
+		}
+	}
+	const gotFiles = checkTree(pkg, want, errors);
 	for (const f of payload.keys()) if (/^etc\/uci-defaults\//.test(f) && payload.get(f).mode !== 0o755)
 		notes.push(`/${f} is 0644 in git; the package must still ship it 0755`);
 
@@ -460,11 +625,7 @@ function checkPackage(pkg, root, srcRoot, ctx) {
 
 	/* apk metadata files */
 	if (!ipk) {
-		const listFile = path.join(root, `lib/apk/packages/${name}.list`);
-		if (fs.existsSync(listFile)) {
-			const listed = fs.readFileSync(listFile, 'utf8').split('\n').filter(Boolean);
-			if (!sameList(listed, [ ...payload.keys() ].map(p => '/' + p))) errors.push(`${name}.list does not list exactly the payload files`);
-		}
+		checkApkList(root, name, [ ...payload.keys() ], errors);
 		if (mk.conffiles) {
 			const cf = path.join(root, `lib/apk/packages/${name}.conffiles`);
 			if (fs.existsSync(cf) && fs.readFileSync(cf, 'utf8') !== mk.conffiles.join('\n') + '\n')
@@ -481,18 +642,63 @@ function checkPackage(pkg, root, srcRoot, ctx) {
 		if (pkg.conffiles !== want) errors.push(`conffiles ${JSON.stringify(pkg.conffiles)}, expected ${JSON.stringify(want)}`);
 	}
 
-	/* private addresses and recorded identifiers */
-	const texts = [ ...Object.entries(pkg.scripts).map(([ k, v ]) => [ `script ${k}`, v ]) ];
-	for (const f of gotFiles) {
-		const abs = path.join(root, f);
-		if (!fs.existsSync(abs)) continue;
-		const buf = fs.readFileSync(abs);
-		if (!buf.includes(0)) texts.push([ `/${f}`, buf.toString('utf8') ]);
-	}
-	if (ctx.findings) for (const [ where, text ] of texts)
-		for (const [ line, what ] of ctx.findings(text, ctx.identifiers)) errors.push(`${where}:${line}: ${what}`);
-
+	scanTexts(pkg, root, gotFiles, ctx, errors);
 	return { errors, notes, name, version: pkg.info.version, files: gotFiles.size, jsChecked, templates };
+}
+
+/* po2lmo's output for one catalogue: a Buffer, or null when it writes none */
+function compileCatalog(po2lmo, src) {
+	const tmp = mkTemp('vantage-verify-');
+	try {
+		const out = path.join(tmp, 'out.lmo');
+		const r = spawnSync(po2lmo, [ src, out ], { encoding: 'utf8' });
+		if (r.error || r.status !== 0) throw new Error(`po2lmo ${src}: ${r.error ? r.error.message : (r.stdout + r.stderr).trim()}`);
+		return fs.existsSync(out) ? fs.readFileSync(out) : null;
+	} finally { rmTemp(tmp); }
+}
+
+/* luci.mk's LuciTranslation package for one po/<lang>/ directory */
+function checkLanguagePackage(pkg, root, mk, lang, ctx) {
+	const errors = [ ...pkg.errors ];
+	const notes = [];
+	const name = lang.name;
+	const ipk = pkg.format === 'ipk';
+	if (!mk.poVersion) errors.push(`${mk.name}/Makefile: PKG_PO_VERSION is ${mk.poVersionRaw || 'unset'}; language packages need PKG_PO_VERSION:=$(PKG_VERSION)-r$(PKG_RELEASE)`);
+
+	/* DEPENDS:=$(PKG_NAME); package-pack.mk adds libc like everywhere else */
+	checkMetadata(pkg, { name, version: mk.poVersion || '(unknown)', license: mk.license, depends: [ 'libc', mk.name ] }, errors);
+	const desc = `Translation for ${mk.name} - ${lang.langName}`;
+	if (!ipk && pkg.info.description !== desc) errors.push(`description ${JSON.stringify(pkg.info.description)}, expected ${JSON.stringify(desc)}`);
+	checkScripts(pkg, (ipk ? expectedIpkScripts : expectedApkScripts)({ name, script: {}, noDefaultPostinst: true }), errors);
+
+	/* payload: the uci-defaults line (written by echo, so 0644) and the
+	   compiled catalogues */
+	const payload = new Map([ [ lang.uciDefaults, { mode: 0o644, want: Buffer.from(lang.uciLine, 'utf8') } ] ]);
+	let compared = 0;
+	for (const c of lang.catalogs) {
+		if (!ctx.po2lmo) {
+			/* without po2lmo it is unknown whether a catalogue compiles to a
+			   file (po2lmo writes none without translations): accept either */
+			if (pkg.entries.some(e => !e.dir && e.path === c.lmo)) payload.set(c.lmo, { mode: 0o644, want: null });
+			continue;
+		}
+		let want;
+		try { want = compileCatalog(ctx.po2lmo, c.src); } catch (e) { errors.push(e.message); continue; }
+		if (want) payload.set(c.lmo, { mode: 0o644, want });
+	}
+	if (!ctx.po2lmo && lang.catalogs.length) notes.push('no po2lmo: compiled catalogues were not compared');
+	const want = new Map([ ...payload ].map(([ rel, p ]) => [ rel, p.mode ]));
+	if (!ipk) want.set(`lib/apk/packages/${name}.list`, 0o644);
+	const gotFiles = checkTree(pkg, want, errors);
+	for (const [ rel, p ] of payload) {
+		const file = path.join(root, rel);
+		if (!p.want || !gotFiles.has(rel) || !fs.existsSync(file)) continue;
+		if (!fs.readFileSync(file).equals(p.want)) errors.push(`/${rel}: content differs from ${rel.endsWith('.lmo') ? 'po2lmo\'s output for the source catalogue' : 'the line luci.mk writes'}`);
+		else if (rel.endsWith('.lmo')) compared++;
+	}
+	if (!ipk) checkApkList(root, name, [ ...payload.keys() ], errors);
+	scanTexts(pkg, root, gotFiles, ctx, errors);
+	return { errors, notes, name, version: pkg.info.version, files: gotFiles.size, catalogs: compared, language: lang.lang };
 }
 
 function checkIndex(index, keysDir, apk, pkgFiles) {
@@ -523,7 +729,7 @@ function checkIndex(index, keysDir, apk, pkgFiles) {
 function parseArgs(argv) {
 	const o = { files: [] };
 	const withValue = { '--src': 'src', '--rev': 'rev', '--apk-tool': 'apk', '--jsmin': 'jsmin', '--luci-config': 'luciConfig',
-		'--index': 'index', '--keys-dir': 'keysDir', '--mirror': 'mirror' };
+		'--index': 'index', '--keys-dir': 'keysDir', '--mirror': 'mirror', '--po2lmo': 'po2lmo', '--luci-mk': 'luciMk' };
 	for (let i = 0; i < argv.length; i++) {
 		const a = argv[i];
 		if (withValue[a]) { if (i + 1 >= argv.length) throw new Error(`${a} needs a value`); o[withValue[a]] = argv[++i]; }
@@ -578,7 +784,8 @@ function main(argv) {
 	try { o = parseArgs(argv); } catch (e) { console.error(`verify_built_apk: ${e.message}`); return 2; }
 	const { pkgs, dirs } = collect(o.files);
 	if (!pkgs.length) { console.error('verify_built_apk: no .apk/.ipk files found'); return 2; }
-	for (const p of pkgs) if (!PACKAGES.some(n => path.basename(p).startsWith(n + '-') || path.basename(p).startsWith(n + '_'))) {
+	const isLanguage = p => path.basename(p).startsWith('luci-i18n-vantage-');
+	for (const p of pkgs) if (!isLanguage(p) && !PACKAGES.some(n => path.basename(p).startsWith(n + '-') || path.basename(p).startsWith(n + '_'))) {
 		console.error(`verify_built_apk: not a Vantage package: ${p}`); return 1;
 	}
 	const pkgDir = path.dirname(path.resolve(pkgs[0]));
@@ -595,6 +802,14 @@ function main(argv) {
 	const jsmin = firstExisting(o.jsmin, process.env.VANTAGE_JSMIN, tools && path.join(tools, 'jsmin'));
 	const jsminOn = jsminSetting(firstExisting(o.luciConfig, tools && path.join(tools, 'luci.config')));
 	if (o.requireTools && jsminOn !== false && !jsmin) { console.error('verify_built_apk: no jsmin to reproduce the minified JavaScript'); return 2; }
+	const po2lmo = firstExisting(o.po2lmo, process.env.VANTAGE_PO2LMO, tools && path.join(tools, 'po2lmo'));
+	if (o.requireTools && !po2lmo && pkgs.some(isLanguage)) { console.error('verify_built_apk: no po2lmo to reproduce the compiled catalogues'); return 2; }
+	if (o.luciMk && !fs.existsSync(o.luciMk)) { console.error(`verify_built_apk: --luci-mk: no such file ${o.luciMk}`); return 2; }
+	/* the build's luci.mk, else the copy dev/i18n/update.sh keeps */
+	const luciMk = firstExisting(o.luciMk, tools && path.join(tools, 'luci.mk'), path.join(ROOT, 'dev', 'i18n', 'luci-languages.mk'));
+	let langs = null;
+	try { if (luciMk) langs = parseLuciLanguages(fs.readFileSync(luciMk, 'utf8'), luciMk); }
+	catch (e) { console.error(`verify_built_apk: ${e.message}`); return 2; }
 
 	let findings = null, identifiers = null;
 	try {
@@ -620,7 +835,7 @@ function main(argv) {
 			if (x.status !== 0) { console.error(`verify_built_apk: tar: ${x.stderr.trim()}`); return 2; }
 			srcRoot = srcTemp;
 		}
-		const ctx = { jsmin, jsminOn, identifiers, findings };
+		const ctx = { jsmin, jsminOn, identifiers, findings, langs, po2lmo };
 		const read = [];
 		for (const p of pkgs) {
 			const dest = mkTemp('vantage-verify-'); temps.push(dest);
@@ -635,12 +850,25 @@ function main(argv) {
 				failed = true;
 				console.log(`FAIL ${label}`);
 				for (const e of res.errors) console.log(`  - ${e}`);
-			} else console.log(`ok   ${label}: ${res.files} files, ${res.jsChecked} scripts parsed, ${res.templates} templates, scripts and metadata as expected`);
+			} else if (res.language) console.log(`ok   ${label}: ${res.files} files, ${res.catalogs} compiled catalogue(s) identical to po2lmo's, uci-defaults, scripts and metadata as expected`);
+			else console.log(`ok   ${label}: ${res.files} files, ${res.jsChecked} scripts parsed, ${res.templates} templates, scripts and metadata as expected`);
 			for (const n of res.notes) console.log(`     note: ${n}`);
 		}
 		const names = read.map(p => p.info.name);
 		if (new Set(names).size !== names.length) { failed = true; console.log(`FAIL more than one version of a package: ${names.join(', ')}`); }
 		for (const d of dirs) for (const e of checkSums(d, pkgs)) { failed = true; console.log(`FAIL ${e}`); }
+		/* a directory holds exactly the packages the source defines */
+		for (const d of dirs) {
+			const here = pkgs.filter(p => path.dirname(p) === d);
+			const fmt = here.length && here[0].endsWith('.ipk') ? 'ipk' : 'apk';
+			let want;
+			try {
+				want = [ ...sourcePackages(srcRoot, langs) ].map(([ name, p ]) =>
+					packageFileName(name, p.kind === 'lang' ? p.mk.poVersion || '(PKG_PO_VERSION unset)' : p.mk.fullVersion, fmt));
+			} catch (e) { failed = true; console.log(`FAIL ${e.message}`); continue; }
+			const got = here.map(p => path.basename(p));
+			if (!sameList(got, want)) { failed = true; console.log(`FAIL ${d} holds [${got.sort().join(', ')}], the source defines [${want.sort().join(', ')}]`); }
+		}
 		if (o.index) {
 			const errs = checkIndex(o.index, o.keysDir, apk, pkgs);
 			for (const e of errs) console.log(`FAIL ${e}`);
@@ -653,6 +881,6 @@ function main(argv) {
 }
 
 module.exports = { parseMakefile, expectedApkScripts, expectedIpkScripts, sourcePayload, substituteVersion, parseJs,
-	modeFromString, checkPackage, LUCI_POSTINST, main };
+	modeFromString, checkPackage, LUCI_POSTINST, parseLuciLanguages, languagePackages, sourcePackages, packageFileName, main };
 
 if (require.main === module) process.exitCode = main(process.argv.slice(2));
