@@ -9,10 +9,10 @@ function num(v) { v = +v; return isFinite(v) ? v : 0; }
 function own(o, k) { return o != null && Object.prototype.hasOwnProperty.call(o, k); }
 
 var BANDS = {
-	'2g': { label: '2.4 GHz', short: '2.4', lo: 2400, hi: 2495, base: 2407 },
-	'5g': { label: '5 GHz', short: '5', lo: 5150, hi: 5895, base: 5000 },
-	'6g': { label: '6 GHz', short: '6', lo: 5925, hi: 7125, base: 5950 },
-	'60g': { label: '60 GHz', short: '60', lo: 57240, hi: 70200, base: 56160 }
+	'2g': { label: _('2.4 GHz'), short: '2.4', lo: 2400, hi: 2495, base: 2407 },
+	'5g': { label: _('5 GHz'), short: '5', lo: 5150, hi: 5895, base: 5000 },
+	'6g': { label: _('6 GHz'), short: '6', lo: 5925, hi: 7125, base: 5950 },
+	'60g': { label: _('60 GHz'), short: '60', lo: 57240, hi: 70200, base: 56160 }
 };
 
 /* rank for comparisons; 'legacy' is 802.11a/b/g */
@@ -21,19 +21,19 @@ var GEN_RANK = { 'legacy': 0, 'Wi-Fi 4': 4, 'Wi-Fi 5': 5, 'Wi-Fi 6': 6, 'Wi-Fi 6
 /* UCI encryption -> friendly label. Suffixes like +ccmp are cipher
    choices, not a different protocol. */
 var SECURITY = [
-	[ /^none$/, 'Open', 'Open network', 'open' ],
-	[ /^owe$/, 'OWE', 'Enhanced Open (OWE)', 'owe' ],
-	[ /^sae-mixed$/, 'WPA2/3', 'WPA2/WPA3-Personal', 'ok' ],
-	[ /^sae(-ext)?$/, 'WPA3', 'WPA3-Personal', 'ok' ],
-	[ /^psk-mixed$/, 'WPA/WPA2', 'WPA/WPA2-Personal (TKIP allowed)', 'weak' ],
-	[ /^psk2$/, 'WPA2', 'WPA2-Personal', 'ok' ],
-	[ /^psk$/, 'WPA', 'WPA-Personal (legacy)', 'weak' ],
-	[ /^wpa3-mixed$/, 'WPA2/3-Ent', 'WPA2/WPA3-Enterprise', 'ok' ],
-	[ /^wpa3(-192)?$/, 'WPA3-Ent', 'WPA3-Enterprise', 'ok' ],
-	[ /^wpa-mixed$/, 'WPA/WPA2-Ent', 'WPA/WPA2-Enterprise', 'weak' ],
-	[ /^wpa2$/, 'WPA2-Ent', 'WPA2-Enterprise', 'ok' ],
-	[ /^wpa$/, 'WPA-Ent', 'WPA-Enterprise (legacy)', 'weak' ],
-	[ /^wep/, 'WEP', 'WEP (insecure)', 'weak' ]
+	[ /^none$/, _('Open'), _('Open network'), 'open' ],
+	[ /^owe$/, _('OWE'), _('Enhanced Open (OWE)'), 'owe' ],
+	[ /^sae-mixed$/, _('WPA2/3'), _('WPA2/WPA3-Personal'), 'ok' ],
+	[ /^sae(-ext)?$/, _('WPA3'), _('WPA3-Personal'), 'ok' ],
+	[ /^psk-mixed$/, _('WPA/WPA2'), _('WPA/WPA2-Personal (TKIP allowed)'), 'weak' ],
+	[ /^psk2$/, _('WPA2'), _('WPA2-Personal'), 'ok' ],
+	[ /^psk$/, _('WPA'), _('WPA-Personal (legacy)'), 'weak' ],
+	[ /^wpa3-mixed$/, _('WPA2/3-Ent'), _('WPA2/WPA3-Enterprise'), 'ok' ],
+	[ /^wpa3(-192)?$/, _('WPA3-Ent'), _('WPA3-Enterprise'), 'ok' ],
+	[ /^wpa-mixed$/, _('WPA/WPA2-Ent'), _('WPA/WPA2-Enterprise'), 'weak' ],
+	[ /^wpa2$/, _('WPA2-Ent'), _('WPA2-Enterprise'), 'ok' ],
+	[ /^wpa$/, _('WPA-Ent'), _('WPA-Enterprise (legacy)'), 'weak' ],
+	[ /^wep/, _('WEP'), _('WEP (insecure)'), 'weak' ]
 ];
 
 return baseclass.extend({
@@ -100,10 +100,10 @@ return baseclass.extend({
 		if (!r || typeof r !== 'object') return null;
 		var std = this.rateStd(r), mhz = num(r.mhz) || null, rate = num(r.rate) || null;
 		var parts = [ fmt.phyRate(rate) ];
-		if (mhz) parts.push(mhz + ' MHz');
+		if (mhz) parts.push(_('%s MHz').format(mhz));
 		parts.push(std === 'legacy' ? _('legacy') : std);
 		var detail = [];
-		if (r.mcs != null && isFinite(+r.mcs)) detail.push('MCS ' + (+r.mcs));
+		if (r.mcs != null && isFinite(+r.mcs)) detail.push(_('MCS %d').format(+r.mcs));
 		if (r.nss != null && +r.nss > 0) detail.push((+r.nss) + '×' + (+r.nss));
 		if (r.short_gi || +r.he_gi > 0 || +r.eht_gi > 0) detail.push(_('short GI'));
 		return { rate: rate, mhz: mhz, std: std, mcs: r.mcs != null ? +r.mcs : null, nss: r.nss != null ? +r.nss : null,

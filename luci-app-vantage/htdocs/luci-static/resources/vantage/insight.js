@@ -22,7 +22,7 @@ function num(v) { v = +v; return isFinite(v) ? v : 0; }
 function finite(v) { return typeof v === 'number' && isFinite(v); }
 function own(o, k) { return o != null && Object.prototype.hasOwnProperty.call(o, k); }
 function speedShort(mbps) { return mbps >= 1000 ? (mbps / 1000) + 'G' : mbps + 'M'; }
-function speedLong(mbps) { return mbps >= 1000 ? (mbps / 1000) + ' Gbit/s' : mbps + ' Mbit/s'; }
+function speedLong(mbps) { return mbps >= 1000 ? _('%s Gbit/s').format(mbps / 1000) : _('%s Mbit/s').format(mbps); }
 function rank(level) { return { err: 3, warn: 2, info: 1, ok: 0 }[level] || 0; }
 
 return baseclass.extend({
@@ -47,7 +47,7 @@ return baseclass.extend({
 			detail: _('%s has no carrier: cable unplugged or switch port down').format(up.dev), page: PAGES.network });
 		else if (up.speed && up.speed.duplex === 'half') out.push({ id: 'uplink', level: 'warn', title: _('Uplink'), value: _('Half duplex'), reason: _('%s · check cable').format(up.dev),
 			detail: _('%s negotiated half duplex; check the cable and switch port').format(up.dev), page: PAGES.network });
-		else if (up.speed && up.speed.mbps < 1000) out.push({ id: 'uplink', level: 'warn', title: _('Uplink'), value: up.speed.mbps + ' Mbit/s', reason: _('%s · slow link').format(up.dev),
+		else if (up.speed && up.speed.mbps < 1000) out.push({ id: 'uplink', level: 'warn', title: _('Uplink'), value: _('%s Mbit/s').format(up.speed.mbps), reason: _('%s · slow link').format(up.dev),
 			detail: _('%s negotiated only %d Mbit/s; a cable pair or port may be faulty').format(up.dev, up.speed.mbps), page: PAGES.network });
 		else {
 			var rate = live.uplinkRate && finite(live.uplinkRate.rx) && finite(live.uplinkRate.tx) ? live.uplinkRate : null;

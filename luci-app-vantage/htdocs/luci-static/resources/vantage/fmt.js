@@ -27,7 +27,7 @@ return baseclass.extend({
 	bitsParts: function(bps) {
 		bps = num(bps);
 		if (bps == null || bps < 0) return { v: DASH, u: '' };
-		var u = [ 'bit/s', 'kbit/s', 'Mbit/s', 'Gbit/s', 'Tbit/s' ], i = 0;
+		var u = [ _('bit/s'), _('kbit/s'), _('Mbit/s'), _('Gbit/s'), _('Tbit/s') ], i = 0;
 		while (bps >= 1000 && i < u.length - 1) { bps /= 1000; i++; }
 		return { v: i === 0 ? bps.toFixed(0) : sig3(bps), u: u[i] };
 	},
@@ -50,7 +50,7 @@ return baseclass.extend({
 	bytes: function(b) {
 		b = num(b);
 		if (b == null || b < 0) return DASH;
-		var u = [ 'B', 'KiB', 'MiB', 'GiB', 'TiB', 'PiB' ], i = 0;
+		var u = [ _('B'), _('KiB'), _('MiB'), _('GiB'), _('TiB'), _('PiB') ], i = 0;
 		while (b >= 1024 && i < u.length - 1) { b /= 1024; i++; }
 		return (i === 0 ? b.toFixed(0) : b >= 100 ? b.toFixed(0) : b >= 10 ? b.toFixed(1) : b.toFixed(2)) + ' ' + u[i];
 	},
@@ -94,7 +94,7 @@ return baseclass.extend({
 	dbm: function(v) {
 		v = num(v);
 		if (v == null || v === 0) return DASH;
-		return (v < 0 ? '−' + Math.abs(v) : String(v)) + ' dBm';
+		return (v < 0 ? '−' + Math.abs(v) : String(v)) + ' ' + _('dBm');
 	},
 
 	/* load average as reported by system.info (fixed point, 65536 = 1.0) */
@@ -128,6 +128,6 @@ return baseclass.extend({
 	/* frequency MHz -> '5975 MHz' / '5.975 GHz' is less readable; keep MHz */
 	mhz: function(v) {
 		v = num(v);
-		return v ? v + ' MHz' : DASH;
+		return v ? _('%s MHz').format(v) : DASH;
 	}
 });

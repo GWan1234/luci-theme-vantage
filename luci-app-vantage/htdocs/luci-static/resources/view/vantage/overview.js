@@ -1265,7 +1265,7 @@ return view.extend({
 				blk.style.width = Math.max(1.2, (sp.to - sp.from) * 100).toFixed(2) + '%';
 				spec.appendChild(blk);
 				spec.appendChild(E('span', { 'class': 'vt-spectrum-lo vt-tn' }, [ String(sp.bandLo) ]));
-				spec.appendChild(E('span', { 'class': 'vt-spectrum-hi vt-tn' }, [ String(sp.bandHi) + ' MHz' ]));
+				spec.appendChild(E('span', { 'class': 'vt-spectrum-hi vt-tn' }, [ _('%s MHz').format(sp.bandHi) ]));
 			}
 			var hist = st.hist.net[r.id] || [];
 			var clients = m.clients.filter(function(c) { return c.radio === r.id; });
@@ -1279,12 +1279,12 @@ return view.extend({
 				]),
 				E('div', { 'class': 'vt-radio-chan' }, [
 					E('span', { 'class': 'vt-big vt-tn' }, [ r.channel ? _('Ch %d').format(r.channel) : fmt.DASH ]),
-					E('span', { 'class': 'vt-radio-width vt-tn' }, [ r.width ? r.width + ' MHz' : '', r.auto ? ' · ' + _('auto') : '' ])
+					E('span', { 'class': 'vt-radio-width vt-tn' }, [ r.width ? _('%s MHz').format(r.width) : '', r.auto ? ' · ' + _('auto') : '' ])
 				]),
 				spec,
 				E('dl', { 'class': 'vt-stats' }, [
 					kv(_('Clients'), E('span', { 'class': 'vt-tn' }, [ String(r.clients) ])),
-					kv(_('Tx power'), E('span', { 'class': 'vt-tn' }, [ r.txpower != null ? r.txpower + ' dBm' : fmt.DASH ])),
+					kv(_('Tx power'), E('span', { 'class': 'vt-tn' }, [ r.txpower != null ? _('%s dBm').format(r.txpower) : fmt.DASH ])),
 					kv(_('Noise'), r.noise != null ? E('span', { 'class': 'vt-tn' }, [ fmt.dbm(r.noise) ]) : E('span', { 'class': 'vt-muted', 'title': _('The driver reports a placeholder value, so no noise floor or SNR is shown') }, [ _('not reported') ])),
 					kv(_('Airtime'), r.airtime != null ? E('span', { 'class': 'vt-tn' }, [ fmt.pct(r.airtime) ]) : E('span', { 'class': 'vt-muted' }, [ _('not reported') ]))
 				]),
@@ -1483,7 +1483,7 @@ return view.extend({
 			E('td', { 'class': 'vt-td-rate', 'data-title': _('Link rate'),
 				'title': _('To device: %s').format(c.tx ? c.tx.label : fmt.DASH) + '\n' + _('From device: %s').format(c.rx ? c.rx.label : fmt.DASH) }, [
 				E('div', { 'class': 'vt-phy vt-tn' }, [ icon('down', 'vt-ico-sm'), E('b', {}, [ c.tx ? fmt.phyRate(c.tx.rate) : fmt.DASH ]) ]),
-				E('div', { 'class': 'vt-phy vt-phy-up vt-tn' }, [ [ c.tx && c.tx.mhz ? c.tx.mhz + ' MHz' : null, c.tx && c.tx.std ? (c.tx.std === 'legacy' ? _('legacy') : c.tx.std) : null ].filter(Boolean).join(' · ') ])
+				E('div', { 'class': 'vt-phy vt-phy-up vt-tn' }, [ [ c.tx && c.tx.mhz ? _('%s MHz').format(c.tx.mhz) : null, c.tx && c.tx.std ? (c.tx.std === 'legacy' ? _('legacy') : c.tx.std) : null ].filter(Boolean).join(' · ') ])
 			]),
 			E('td', { 'class': 'vt-td-live', 'data-title': _('Live') }, [
 				E('div', { 'class': 'vt-live-cell' }, [
@@ -1864,7 +1864,7 @@ return view.extend({
 			body: [
 				E('div', { 'class': 'vt-dactions' }, [ pageLink(insight.PAGES.wireless, _('Radio settings')) ]),
 				E('div', { 'class': 'vt-dgrid' }, [
-					E('div', { 'class': 'vt-dcard' }, [ E('div', { 'class': 'vt-dcard-label' }, [ _('Channel') ]), E('div', { 'class': 'vt-dcard-value' }, [ r.channel ? String(r.channel) : fmt.DASH ]), E('div', { 'class': 'vt-dcard-sub' }, [ [ r.width ? r.width + ' MHz' : null, r.freq ? fmt.mhz(r.freq) : null ].filter(Boolean).join(' · ') ]) ]),
+					E('div', { 'class': 'vt-dcard' }, [ E('div', { 'class': 'vt-dcard-label' }, [ _('Channel') ]), E('div', { 'class': 'vt-dcard-value' }, [ r.channel ? String(r.channel) : fmt.DASH ]), E('div', { 'class': 'vt-dcard-sub' }, [ [ r.width ? _('%s MHz').format(r.width) : null, r.freq ? fmt.mhz(r.freq) : null ].filter(Boolean).join(' · ') ]) ]),
 					E('div', { 'class': 'vt-dcard' }, [ E('div', { 'class': 'vt-dcard-label' }, [ _('Traffic') ]), E('div', { 'class': 'vt-dcard-value' }, [ rr ? fmt.bits(rr.tx + rr.rx) : fmt.DASH ]), E('div', { 'class': 'vt-dcard-sub vt-tn' }, [ rr ? '↓ ' + fmt.bits(rr.tx) + ' · ↑ ' + fmt.bits(rr.rx) : '' ]), sparkline(this.st.hist.net[r.id] || [], [ 2, 1 ], 0, 'vt-spark-' + (r.band || 'x'), { min: 1000, scale: bitsLabel }) ])
 				]),
 				ins.notes.length ? E('ul', { 'class': 'vt-notes' }, ins.notes.map(function(n) { return E('li', { 'class': 'vt-note vt-note-' + n.level }, [ icon(n.level === 'warn' ? 'warn' : 'info', 'vt-ico-sm'), E('span', {}, [ n.text ]) ]); })) : '',
@@ -1872,7 +1872,7 @@ return view.extend({
 					kv(_('Status'), r.disabled ? _('Disabled') : r.up ? _('Up') : _('Down')),
 					kv(_('Mode'), [ r.htmode || fmt.DASH, r.hwmodes ? E('small', {}, [ r.hwmodes ]) : '' ]),
 					kv(_('Centre frequency'), r.spectrum ? _('%d MHz (%d–%d MHz)').format(r.spectrum.centre, r.spectrum.lo, r.spectrum.hi) : fmt.DASH),
-					kv(_('Tx power'), r.txpower != null ? r.txpower + ' dBm' + (r.txpowerCfg != null && r.txpowerCfg !== r.txpower ? ' ' + _('(configured %d dBm, limited by regulatory rules)').format(r.txpowerCfg) : '') : fmt.DASH),
+					kv(_('Tx power'), r.txpower != null ? _('%s dBm').format(r.txpower) + (r.txpowerCfg != null && r.txpowerCfg !== r.txpower ? ' ' + _('(configured %d dBm, limited by regulatory rules)').format(r.txpowerCfg) : '') : fmt.DASH),
 					kv(_('Noise floor'), r.noise != null ? fmt.dbm(r.noise) : E('span', { 'class': 'vt-muted' }, [ r.noiseRaw != null ? _('not reported (driver placeholder %s)').format(fmt.dbm(r.noiseRaw)) : _('not reported') ])),
 					kv(_('Country'), r.country || fmt.DASH)
 				]) ]),

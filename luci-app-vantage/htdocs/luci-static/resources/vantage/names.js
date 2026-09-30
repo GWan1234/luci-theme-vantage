@@ -39,8 +39,8 @@ var LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(^|[^\ud800-\udbff])[\u
 var SPACES = /[\u0020\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000]+/g;
 
 var SOURCES = {
-	alias: 'Alias', dns: 'DNS', mdns: 'mDNS', dhcp: 'DHCP', wps: 'WPS',
-	vendor: 'Vendor', 'private': 'Private', mac: 'MAC'
+	alias: _('Alias'), dns: _('DNS'), mdns: _('mDNS'), dhcp: _('DHCP'), wps: _('WPS'),
+	vendor: _('Vendor'), 'private': _('Private'), mac: _('MAC')
 };
 
 /* device icons the user can pick; also guessed from names */

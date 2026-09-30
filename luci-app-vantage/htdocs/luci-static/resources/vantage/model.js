@@ -165,7 +165,7 @@ return baseclass.extend({
 
 	speedLabel: function(sp) {
 		if (!sp) return fmt.DASH;
-		var v = sp.mbps >= 1000 ? (sp.mbps / 1000) + ' Gbit/s' : sp.mbps + ' Mbit/s';
+		var v = sp.mbps >= 1000 ? _('%s Gbit/s').format(sp.mbps / 1000) : _('%s Mbit/s').format(sp.mbps);
 		return v + (sp.duplex === 'full' ? ' · ' + _('full duplex') : sp.duplex === 'half' ? ' · ' + _('half duplex') : '');
 	},
 
